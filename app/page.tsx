@@ -11,7 +11,7 @@ export default function Home() {
           <CardDescription className="text-lg text-gray-600 mt-2">AI-powered code generation with formal correctness guarantees.</CardDescription>
         </CardHeader>
         <CardContent className="p-8">
-          <p className="text-center text-gray-700 mb-6">Generate distributed system handlers proven correct by TLA+ model checking. Describe your desired behavior in plain English, and let Guardrails: Atomic generate a formally verified implementation.</p>
+          <p className="text-center text-gray-700 mb-6">Generate distributed system handlers proven correct by Z3 model checking. Describe your desired behavior in plain English, and let Guardrails: Atomic generate a formally verified implementation.</p>
           <div className="flex gap-4 justify-center">
             <Link href="/verify">
               <Button size="lg">Start Verification</Button>

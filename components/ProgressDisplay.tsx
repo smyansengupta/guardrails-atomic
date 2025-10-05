@@ -96,10 +96,10 @@ export function ProgressDisplay({ streamState }: ProgressDisplayProps) {
                     {event.type === 'progress' && `📍 ${event.message}`}
                     {event.type === 'iteration_start' && `🔄 Started iteration ${event.iteration}`}
                     {event.type === 'code_generated' && `✨ Code generated (${event.codeLength} chars)`}
-                    {event.type === 'tla_generated' && `📄 TLA+ generated`}
-                    {event.type === 'tlc_start' && `▶️  TLC started`}
+                    {event.type === 'tla_generated' && `📄 Z3 generated`}
+                    {event.type === 'tlc_start' && `▶️  Verification started`}
                     {event.type === 'tlc_complete' &&
-                      `✅ TLC complete (${event.statesExplored.toLocaleString()} states, ${event.duration}ms)`}
+                      `✅ Verification complete (${event.statesExplored.toLocaleString()} states, ${event.duration}ms)`}
                     {event.type === 'iteration_complete' &&
                       (event.success
                         ? `✓ Iteration ${event.iteration} succeeded`
