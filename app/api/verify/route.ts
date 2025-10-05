@@ -80,14 +80,13 @@ export async function POST(request: NextRequest) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
     if (
-      errorMessage.toLowerCase().includes('tla') ||
       errorMessage.toLowerCase().includes('not implemented')
     ) {
       return NextResponse.json<VerifyResponse>(
         {
           success: false,
           error:
-            'TLA+ verification is still under development. The code generator is working, but formal verification will be available soon!',
+            'Verification feature is still under development. Please try again later.',
         },
         { status: 501 }
       );

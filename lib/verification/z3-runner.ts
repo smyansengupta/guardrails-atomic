@@ -37,9 +37,15 @@ export async function runZ3(
 
   try {
     // Initialize Z3
+    // Note: z3-solver looks for WASM files in specific locations
+    // We copy them via scripts to ensure they're accessible
+    logger.debug('Initializing Z3 solver...');
+    
     const { Context } = await init();
     const ctx = Context('main');
     const solver = new ctx.Solver();
+    
+    logger.debug('Z3 solver initialized successfully');
 
     // Set timeout
     solver.set('timeout', timeout);
@@ -79,6 +85,9 @@ async function executeSMTLib(
   const lines = smtLib.split('\n');
   const constraintsChecked: string[] = [];
   const declarations: Map<string, any> = new Map();
+  
+  // Store ctx in declarations for recursive use
+  declarations.set('__ctx__', ctx);
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -186,35 +195,19 @@ function translateFormulaToZ3(
   ctx: any
 ): any {
   try {
-    // Handle simple comparison: (>= var1 0)
-    const geMatch = formula.match(/\(>=\s+(\w+)\s+(-?\d+)\)/);
-    if (geMatch) {
-      const [, varName, value] = geMatch;
-      const variable = declarations.get(varName);
-      if (variable) {
-        return variable.ge(parseInt(value));
-      }
+    formula = formula.trim();
+
+    // Handle boolean variables directly
+    if (declarations.has(formula) && !formula.includes('(')) {
+      return declarations.get(formula);
     }
 
-    // Handle equality: (= var1 var2)
-    const eqMatch = formula.match(/\(=\s+(\w+)\s+(\w+)\)/);
-    if (eqMatch) {
-      const [, var1, var2] = eqMatch;
-      const v1 = declarations.get(var1);
-      const v2 = declarations.get(var2);
-      if (v1 && v2) {
-        return v1.eq(v2);
-      }
-    }
-
-    // Handle distinct: (distinct var1 var2)
-    const distinctMatch = formula.match(/\(distinct\s+(\w+)\s+(\w+)\)/);
-    if (distinctMatch) {
-      const [, var1, var2] = distinctMatch;
-      const v1 = declarations.get(var1);
-      const v2 = declarations.get(var2);
-      if (v1 && v2) {
-        return v1.neq(v2);
+    // Handle negation: (not expr)
+    if (formula.startsWith('(not ')) {
+      const inner = formula.slice(5, -1).trim();
+      const innerExpr = translateFormulaToZ3(inner, declarations, ctx);
+      if (innerExpr) {
+        return ctx.Not(innerExpr);
       }
     }
 
@@ -254,6 +247,107 @@ function translateFormulaToZ3(
       }
     }
 
+    // Handle arithmetic expressions first (needed for comparisons)
+    
+    // Handle addition: (+ a b c ...)
+    if (formula.startsWith('(+ ')) {
+      const operands = extractSubFormulas(formula.slice(3, -1));
+      const values = operands.map(op => {
+        const trimmed = op.trim();
+        if (/^-?\d+$/.test(trimmed)) {
+          return parseInt(trimmed);
+        }
+        return declarations.get(trimmed);
+      }).filter(v => v !== undefined);
+      
+      if (values.length > 0) {
+        return values.reduce((acc, val) => 
+          typeof acc === 'number' && typeof val === 'number' 
+            ? acc + val 
+            : typeof acc === 'number' 
+              ? val.add(acc)
+              : acc.add(val)
+        );
+      }
+    }
+
+    // Handle subtraction: (- a b)
+    if (formula.startsWith('(- ')) {
+      const operands = extractSubFormulas(formula.slice(3, -1));
+      if (operands.length === 2) {
+        const a = parseOperand(operands[0], declarations);
+        const b = parseOperand(operands[1], declarations);
+        if (a !== null && b !== null) {
+          return typeof a === 'number' && typeof b === 'number'
+            ? a - b
+            : typeof a === 'number'
+              ? b.sub(a).mul(-1)
+              : a.sub(b);
+        }
+      }
+    }
+
+    // Handle comparisons with expressions
+    
+    // Handle >=, <=, >, <
+    const compMatch = formula.match(/^\((>=|<=|>|<)\s+(.+)\)$/);
+    if (compMatch) {
+      const [, op, rest] = compMatch;
+      const operands = extractSubFormulas(rest);
+      if (operands.length === 2) {
+        const left = parseOperand(operands[0], declarations);
+        const right = parseOperand(operands[1], declarations);
+        
+        if (left !== null && right !== null) {
+          const leftExpr = typeof left === 'number' ? left : left;
+          const rightExpr = typeof right === 'number' ? right : right;
+          
+          if (typeof leftExpr !== 'number') {
+            switch (op) {
+              case '>=': return leftExpr.ge(rightExpr);
+              case '<=': return leftExpr.le(rightExpr);
+              case '>': return leftExpr.gt(rightExpr);
+              case '<': return leftExpr.lt(rightExpr);
+            }
+          }
+        }
+      }
+    }
+
+    // Handle equality: (= expr1 expr2)
+    if (formula.startsWith('(= ')) {
+      const operands = extractSubFormulas(formula.slice(3, -1));
+      if (operands.length === 2) {
+        const left = parseOperand(operands[0], declarations);
+        const right = parseOperand(operands[1], declarations);
+        
+        if (left !== null && right !== null) {
+          if (typeof left === 'number' && typeof right === 'number') {
+            return left === right ? ctx.Bool.val(true) : ctx.Bool.val(false);
+          } else if (typeof left === 'number') {
+            return right.eq(left);
+          } else {
+            return left.eq(right);
+          }
+        }
+      }
+    }
+
+    // Handle distinct: (distinct var1 var2)
+    if (formula.startsWith('(distinct ')) {
+      const operands = extractSubFormulas(formula.slice(10, -1));
+      if (operands.length === 2) {
+        const left = parseOperand(operands[0], declarations);
+        const right = parseOperand(operands[1], declarations);
+        
+        if (left !== null && right !== null) {
+          if (typeof left !== 'number') {
+            return left.neq(right);
+          }
+        }
+      }
+    }
+
     logger.warn('Could not translate formula', { formula: formula.slice(0, 50) });
     return null;
 
@@ -261,6 +355,30 @@ function translateFormulaToZ3(
     logger.error('Error translating formula', { formula, error });
     return null;
   }
+}
+
+/**
+ * Parse an operand (can be a number, variable, or expression)
+ */
+function parseOperand(operand: string, declarations: Map<string, any>): any {
+  operand = operand.trim();
+  
+  // Check if it's a number
+  if (/^-?\d+$/.test(operand)) {
+    return parseInt(operand);
+  }
+  
+  // Check if it's a variable
+  if (declarations.has(operand)) {
+    return declarations.get(operand);
+  }
+  
+  // It might be an expression, recursively parse
+  if (operand.startsWith('(')) {
+    return translateFormulaToZ3(operand, declarations, declarations.get('__ctx__'));
+  }
+  
+  return null;
 }
 
 /**
@@ -307,12 +425,35 @@ function extractZ3Model(model: any, declarations: Map<string, any>): Z3Model {
   const variables: Record<string, Z3Value> = {};
 
   for (const [varName, variable] of declarations.entries()) {
+    // Skip internal keys
+    if (varName.startsWith('__')) {
+      continue;
+    }
+    
     try {
       const value = model.eval(variable);
-      const sort = variable.sort().toString();
+      
+      // Try to get sort, handle different API versions
+      let sortStr = 'Unknown';
+      try {
+        if (typeof variable.sort === 'function') {
+          sortStr = variable.sort().toString();
+        } else if (variable.sort) {
+          sortStr = variable.sort.toString();
+        } else if (variable.ctx && variable.ctx.getSort) {
+          sortStr = variable.ctx.getSort(variable).toString();
+        }
+      } catch {
+        // If sort extraction fails, infer from value
+        if (value.toString() === 'true' || value.toString() === 'false') {
+          sortStr = 'Bool';
+        } else if (!isNaN(parseInt(value.toString()))) {
+          sortStr = 'Int';
+        }
+      }
       
       variables[varName] = {
-        sort,
+        sort: sortStr,
         value: value.toString(),
         interpretation: value.asString?.() || value.toString(),
       };

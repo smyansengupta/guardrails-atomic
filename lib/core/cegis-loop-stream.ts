@@ -2,14 +2,13 @@ import { Specification } from '@/lib/types/specification';
 import {
   VerificationResult,
   IterationRecord,
-  TLCResult,
+  Z3Result,
   ProofReport,
 } from '@/lib/types/verification';
 import { VerificationEvent } from '@/lib/types/api';
 import { generateCode } from './code-generator';
-import { generateTLAModule, tlaModuleToString, generateTLCConfig } from '@/lib/verification/tla-generator';
-import { runTLC } from '@/lib/verification/tlc-runner';
-import { generateRepairFeedback } from '@/lib/verification/counterexample-parser';
+import { generateZ3Module, z3ModuleToString, generateZ3Config } from '@/lib/verification/z3-generator';
+import { runZ3 } from '@/lib/verification/z3-runner';
 import { logger } from '@/lib/utils/logger';
 import { VerificationError } from '@/lib/utils/errors';
 
@@ -18,6 +17,8 @@ import { VerificationError } from '@/lib/utils/errors';
  *
  * This is the event-emitting version of runCEGISLoop() that supports
  * real-time progress updates via Server-Sent Events.
+ * 
+ * Uses Z3 SMT solver for formal verification.
  *
  * @param spec - The parsed specification
  * @param maxIterations - Maximum number of CEGIS iterations (default: 8)
@@ -33,7 +34,7 @@ export async function runCEGISLoopWithEvents(
   let currentCode: string | null = null;
   let feedback: string | undefined = undefined;
 
-  logger.info(`Starting CEGIS loop with SSE events (max ${maxIterations} iterations)`);
+  logger.info(`Starting CEGIS loop (Z3) with SSE events (max ${maxIterations} iterations)`);
 
   // Emit parsing phase
   emitEvent({
@@ -92,39 +93,39 @@ export async function runCEGISLoopWithEvents(
         throw new VerificationError(`Code generation failed: ${errorMessage}`);
       }
 
-      // 2. TLA+ GENERATION PHASE
+      // 2. Z3 CONSTRAINT GENERATION PHASE
       emitEvent({
         type: 'progress',
         phase: 'generating_tla',
-        message: 'Translating specification to TLA+...',
+        message: 'Generating Z3 SMT constraints...',
         timestamp: new Date().toISOString(),
       });
 
-      let tlaModule;
-      let tlaSpec: string;
+      let z3Module;
+      let z3Constraints: string;
       let configFile: string;
 
       try {
-        tlaModule = await generateTLAModule(spec);
-        tlaSpec = tlaModuleToString(tlaModule);
-        configFile = await generateTLCConfig(spec);
+        z3Module = generateZ3Module(spec);
+        z3Constraints = z3ModuleToString(z3Module);
+        configFile = generateZ3Config(spec);
 
         emitEvent({
           type: 'tla_generated',
           iteration: i,
-          tlaLength: tlaSpec.length,
+          tlaLength: z3Constraints.length,
           timestamp: new Date().toISOString(),
         });
 
-        logger.info(`Generated TLA+ spec: ${tlaSpec.length} characters`);
+        logger.info(`Generated Z3 constraints: ${z3Constraints.length} characters`);
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        logger.error(`TLA+ generation failed in iteration ${i}: ${errorMessage}`);
+        logger.error(`Z3 constraint generation failed in iteration ${i}: ${errorMessage}`);
 
         emitEvent({
           type: 'error',
           phase: 'generating_tla',
-          message: `TLA+ generation failed: ${errorMessage}. This feature is still in development.`,
+          message: `Z3 constraint generation failed: ${errorMessage}`,
           timestamp: new Date().toISOString(),
         });
 
@@ -133,12 +134,12 @@ export async function runCEGISLoopWithEvents(
           success: false,
           iterations: i,
           finalCode: currentCode,
-          error: `TLA+ generation not yet implemented: ${errorMessage}`,
+          error: `Z3 constraint generation failed: ${errorMessage}`,
           iterationHistory,
         };
       }
 
-      // 3. TLC VERIFICATION PHASE
+      // 3. Z3 VERIFICATION PHASE
       emitEvent({
         type: 'tlc_start',
         iteration: i,
@@ -148,79 +149,81 @@ export async function runCEGISLoopWithEvents(
       emitEvent({
         type: 'progress',
         phase: 'running_tlc',
-        message: 'Running TLC model checker...',
+        message: 'Running Z3 SMT solver...',
         timestamp: new Date().toISOString(),
       });
 
-      let tlcResult: TLCResult;
+      let z3Result: Z3Result;
 
       try {
-        tlcResult = await runTLC(tlaSpec, configFile);
+        z3Result = await runZ3(z3Constraints, { timeout: 60000 });
 
-        const tlcDuration = Date.now() - iterationStartTime;
+        const z3Duration = Date.now() - iterationStartTime;
 
         emitEvent({
           type: 'tlc_complete',
           iteration: i,
-          success: tlcResult.success,
-          statesExplored: tlcResult.statesExplored || 0,
-          duration: tlcDuration,
+          success: z3Result.success && z3Result.result === 'unsat',
+          statesExplored: 0, // Z3 doesn't count states like TLC
+          duration: z3Duration,
           timestamp: new Date().toISOString(),
         });
 
         logger.info(
-          `TLC completed: ${tlcResult.success ? 'VERIFIED' : 'VIOLATION'}, ` +
-          `${tlcResult.statesExplored || 0} states explored`
+          `Z3 completed: ${z3Result.result}, ` +
+          `${z3Result.constraintsChecked.length} constraints checked`
         );
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        logger.error(`TLC execution failed in iteration ${i}: ${errorMessage}`);
+        logger.error(`Z3 execution failed in iteration ${i}: ${errorMessage}`);
 
         emitEvent({
           type: 'error',
           phase: 'running_tlc',
-          message: `TLC execution failed: ${errorMessage}`,
+          message: `Z3 execution failed: ${errorMessage}`,
           timestamp: new Date().toISOString(),
         });
 
-        throw new VerificationError(`TLC execution failed: ${errorMessage}`);
+        throw new VerificationError(`Z3 execution failed: ${errorMessage}`);
       }
 
       // Record iteration
       iterationHistory.push({
         iteration: i,
         code: currentCode,
-        tlaSpec,
-        tlcResult,
+        z3Constraints,
+        z3Result,
         feedback,
       });
 
       // 4. ANALYZE RESULTS PHASE
+      const isVerified = z3Result.success && z3Result.result === 'unsat';
+      
       emitEvent({
         type: 'progress',
         phase: 'analyzing_results',
-        message: tlcResult.success ? 'Verification successful!' : 'Analyzing counterexample...',
+        message: isVerified ? 'Verification successful!' : 'Analyzing counterexample...',
         timestamp: new Date().toISOString(),
       });
 
       emitEvent({
         type: 'iteration_complete',
         iteration: i,
-        success: tlcResult.success,
-        statesExplored: tlcResult.statesExplored || 0,
-        violationFound: !tlcResult.success,
+        success: isVerified,
+        statesExplored: 0,
+        violationFound: !isVerified,
         timestamp: new Date().toISOString(),
       });
 
       // 5. CHECK VERIFICATION SUCCESS
-      if (tlcResult.success) {
-        const proofReport = generateProofReport(spec, tlcResult, i);
+      if (isVerified) {
+        const proofReport = generateProofReport(z3Result, spec);
 
         const result: VerificationResult = {
           success: true,
           iterations: i,
           finalCode: currentCode,
-          tlaSpec,
+          z3Constraints,
           proofReport,
           iterationHistory,
         };
@@ -233,17 +236,17 @@ export async function runCEGISLoopWithEvents(
           timestamp: new Date().toISOString(),
         });
 
-        logger.info(`CEGIS loop succeeded in ${i} iteration(s)`);
+        logger.info(`CEGIS loop (Z3) succeeded in ${i} iteration(s)`);
         return result;
       }
 
       // 6. EXTRACT COUNTEREXAMPLE AND PREPARE REPAIR
-      if (tlcResult.counterExample) {
-        feedback = `ORIGINAL CODE:\n${currentCode}\n\n${generateRepairFeedback(tlcResult.counterExample)}`;
-        logger.info(`Iteration ${i} failed, preparing repair with counterexample feedback`);
+      if (z3Result.counterExample) {
+        feedback = generateZ3RepairFeedback(z3Result, currentCode);
+        logger.info(`Iteration ${i} failed, preparing repair with Z3 counterexample feedback`);
       } else {
-        // Fallback: use raw TLC output
-        feedback = `ORIGINAL CODE:\n${currentCode}\n\nTLC Output:\n${tlcResult.output || 'No output available'}`;
+        // Fallback: use raw Z3 output
+        feedback = `ORIGINAL CODE:\n${currentCode}\n\nZ3 Result: ${z3Result.result}\nOutput:\n${z3Result.output || 'No output available'}`;
         logger.warn(`Iteration ${i} failed, no structured counterexample found`);
       }
     }
@@ -283,26 +286,78 @@ export async function runCEGISLoopWithEvents(
 }
 
 /**
- * Generates a proof report from successful TLC verification.
+ * Generates a proof report from successful Z3 verification.
  */
 function generateProofReport(
-  spec: Specification,
-  tlcResult: TLCResult,
-  iterations: number
+  z3Result: Z3Result,
+  spec: Specification
 ): ProofReport {
-  const invariantsVerified = tlcResult.invariantsChecked || spec.invariants.map(inv => inv.type);
+  // Extract fault scenarios checked from the fault model
+  const faultScenariosChecked: string[] = [];
+
+  if (spec.faultModel.delivery === 'at_least_once') {
+    faultScenariosChecked.push('Duplicate message delivery');
+  } else if (spec.faultModel.delivery === 'at_most_once') {
+    faultScenariosChecked.push('Message loss');
+  }
+
+  if (spec.faultModel.reorder) {
+    faultScenariosChecked.push('Message reordering');
+  }
+
+  if (spec.faultModel.crash_restart) {
+    faultScenariosChecked.push('Process crash and restart');
+  }
+
+  if (spec.faultModel.network_partition) {
+    faultScenariosChecked.push('Network partition');
+  }
+
+  // Generate guarantees from verified invariants
+  const guarantees: string[] = spec.invariants.map(inv => {
+    switch (inv.type) {
+      case 'idempotent':
+        return 'Function is idempotent - duplicate requests have no additional effect';
+      case 'no_double_spend':
+        return 'Resources cannot be spent twice';
+      case 'atomic_no_partial_commit':
+        return 'All state changes are atomic - no partial commits';
+      case 'conservation':
+        return 'Total resources are conserved across all operations';
+      default:
+        return `${inv.type} property is maintained`;
+    }
+  });
 
   return {
-    statesExplored: tlcResult.statesExplored || 0,
-    invariantsVerified,
-    faultScenariosChecked: [
-      `Delivery: ${spec.faultModel.delivery}`,
-      spec.faultModel.reorder ? 'Message reordering' : null,
-      spec.faultModel.crash_restart ? 'Crash/restart' : null,
-      spec.faultModel.network_partition ? 'Network partition' : null,
-    ].filter(Boolean) as string[],
-    guarantees: invariantsVerified.map(inv => `${inv} property verified under ${spec.faultModel.delivery} delivery`),
+    constraintsChecked: z3Result.constraintsChecked.length,
+    invariantsVerified: spec.invariants.map(inv => inv.type),
+    faultScenariosChecked,
+    guarantees,
     timestamp: new Date().toISOString(),
-    duration: tlcResult.duration || 0,
+    duration: z3Result.duration || 0,
   };
+}
+
+/**
+ * Generate repair feedback from Z3 counter-example
+ */
+function generateZ3RepairFeedback(z3Result: Z3Result, currentCode: string): string {
+  if (!z3Result.counterExample) {
+    return `ORIGINAL CODE:\n${currentCode}\n\nZ3 found violations but no detailed counter-example is available.\n\nPlease review the code and fix the invariant violations.`;
+  }
+
+  const { counterExample } = z3Result;
+
+  return `ORIGINAL CODE:
+${currentCode}
+
+Z3 SMT SOLVER FOUND THIS BUG:
+${counterExample.violatedConstraint}
+
+COUNTER-EXAMPLE MODEL:
+${counterExample.trace}
+
+SUGGESTED FIX:
+${counterExample.suggestedFix}`;
 }

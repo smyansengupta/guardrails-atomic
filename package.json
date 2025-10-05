@@ -4,12 +4,15 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "next dev",
+    "predev": "node scripts/copy-z3-wasm.js || true",
+    "dev": "node scripts/watch-and-copy-z3.js & next dev",
+    "prebuild": "node scripts/copy-z3-wasm.js || true",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "test": "vitest",
-    "test:ui": "vitest --ui"
+    "test:ui": "vitest --ui",
+    "postinstall": "node scripts/copy-z3-wasm.js || true"
   },
   "keywords": [],
   "author": "",
