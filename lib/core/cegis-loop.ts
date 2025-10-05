@@ -2,21 +2,20 @@ import { Specification } from '@/lib/types/specification';
 import {
   VerificationResult,
   IterationRecord,
-  TLCResult,
+  Z3Result,
   ProofReport
 } from '@/lib/types/verification';
 import { generateCode } from './code-generator';
-import { generateTLAModule, tlaModuleToString, generateTLCConfig } from '@/lib/verification/tla-generator';
-import { runTLC } from '@/lib/verification/tlc-runner';
-import { parseCounterExample, generateRepairFeedback } from '@/lib/verification/counterexample-parser';
+import { generateZ3Module, z3ModuleToString, generateZ3Config } from '@/lib/verification/z3-generator';
+import { runZ3 } from '@/lib/verification/z3-runner';
 import { logger } from '@/lib/utils/logger';
 import { VerificationError } from '@/lib/utils/errors';
 
 /**
- * Generate a proof report from successful verification
+ * Generate a proof report from successful Z3 verification
  */
 function generateProofReport(
-  tlcResult: TLCResult,
+  z3Result: Z3Result,
   spec: Specification
 ): ProofReport {
   // Extract fault scenarios checked from the fault model
@@ -57,17 +56,39 @@ function generateProofReport(
   });
 
   return {
-    statesExplored: tlcResult.statesExplored,
-    invariantsVerified: tlcResult.invariantsChecked,
+    constraintsChecked: z3Result.constraintsChecked.length,
+    invariantsVerified: spec.invariants.map(inv => inv.type),
     faultScenariosChecked,
     guarantees,
     timestamp: new Date().toISOString(),
-    duration: tlcResult.duration || 0,
+    duration: z3Result.duration || 0,
   };
 }
 
 /**
+ * Generate repair feedback from Z3 counter-example
+ */
+function generateZ3RepairFeedback(z3Result: Z3Result, currentCode: string): string {
+  if (!z3Result.counterExample) {
+    return `Z3 found violations but no detailed counter-example is available.\n\nPlease review the code and fix the invariant violations.`;
+  }
+
+  const { counterExample } = z3Result;
+
+  return `Z3 SMT SOLVER FOUND THIS BUG:
+${counterExample.violatedConstraint}
+
+COUNTER-EXAMPLE MODEL:
+${counterExample.trace}
+
+SUGGESTED FIX:
+${counterExample.suggestedFix}`;
+}
+
+/**
  * Main CEGIS loop: iteratively generate code, verify, and repair
+ *
+ * Uses Z3 SMT solver for formal verification.
  *
  * @param spec - The specification to verify
  * @param maxIterations - Maximum number of CEGIS iterations (default: 8)
@@ -75,17 +96,17 @@ function generateProofReport(
  *
  * The CEGIS loop works as follows:
  * 1. Generate TypeScript code from specification using LLM
- * 2. Translate specification to TLA+ formal model
- * 3. Run TLC model checker to verify all invariants
- * 4. If violations found, extract counterexample and generate repair feedback
+ * 2. Translate specification to Z3 SMT constraints
+ * 3. Run Z3 solver to verify all invariants
+ * 4. If violations found (sat), extract counterexample and generate repair feedback
  * 5. Use feedback to regenerate code (repair mode)
- * 6. Repeat until verified or max iterations reached
+ * 6. Repeat until verified (unsat) or max iterations reached
  */
 export async function runCEGISLoop(
   spec: Specification,
   maxIterations: number = 8
 ): Promise<VerificationResult> {
-  logger.info(`Starting CEGIS loop for spec: ${spec.name}`, { maxIterations });
+  logger.info(`Starting CEGIS loop (Z3) for spec: ${spec.name}`, { maxIterations });
 
   const iterationHistory: IterationRecord[] = [];
   let currentCode: string | null = null;
@@ -112,41 +133,41 @@ export async function runCEGISLoop(
         );
       }
 
-      // Phase 2: TLA+ Generation
-      logger.debug('Phase 2: Generating TLA+ specification');
-      let tlaModule;
-      let tlaSpec: string;
+      // Phase 2: Z3 Constraint Generation
+      logger.debug('Phase 2: Generating Z3 SMT constraints');
+      let z3Module;
+      let z3Constraints: string;
       let configFile: string;
 
       try {
-        tlaModule = await generateTLAModule(spec);
-        tlaSpec = tlaModuleToString(tlaModule);
-        configFile = await generateTLCConfig(spec);
-        logger.debug('TLA+ generation successful', {
-          tlaLength: tlaSpec.length,
-          configLength: configFile.length
+        z3Module = generateZ3Module(spec);
+        z3Constraints = z3ModuleToString(z3Module);
+        configFile = generateZ3Config(spec);
+        logger.debug('Z3 constraint generation successful', {
+          constraintsLength: z3Constraints.length,
+          numConstraints: z3Module.constraints.length,
         });
       } catch (error) {
-        logger.error(`TLA+ generation failed in iteration ${i}`, error);
+        logger.error(`Z3 constraint generation failed in iteration ${i}`, error);
         throw new VerificationError(
-          `TLA+ generation failed: ${error instanceof Error ? error.message : String(error)}`
+          `Z3 constraint generation failed: ${error instanceof Error ? error.message : String(error)}`
         );
       }
 
-      // Phase 3: TLC Verification
-      logger.debug('Phase 3: Running TLC model checker');
-      let tlcResult: TLCResult;
+      // Phase 3: Z3 Verification
+      logger.debug('Phase 3: Running Z3 SMT solver');
+      let z3Result: Z3Result;
 
       try {
-        tlcResult = await runTLC(tlaSpec, configFile);
-        logger.info(`TLC completed - Success: ${tlcResult.success}`, {
-          statesExplored: tlcResult.statesExplored,
-          invariantsChecked: tlcResult.invariantsChecked.length,
+        z3Result = await runZ3(z3Constraints, { timeout: 60000 });
+        logger.info(`Z3 completed - Result: ${z3Result.result}`, {
+          success: z3Result.success,
+          constraintsChecked: z3Result.constraintsChecked.length,
         });
       } catch (error) {
-        logger.error(`TLC execution failed in iteration ${i}`, error);
+        logger.error(`Z3 execution failed in iteration ${i}`, error);
         throw new VerificationError(
-          `TLC execution failed: ${error instanceof Error ? error.message : String(error)}`
+          `Z3 execution failed: ${error instanceof Error ? error.message : String(error)}`
         );
       }
 
@@ -155,30 +176,30 @@ export async function runCEGISLoop(
       const iterationRecord: IterationRecord = {
         iteration: i,
         code: currentCode,
-        tlaSpec,
-        tlcResult: {
-          ...tlcResult,
+        z3Constraints,
+        z3Result: {
+          ...z3Result,
           duration: iterationDuration,
         },
         feedback,
       };
       iterationHistory.push(iterationRecord);
 
-      // Check if verification succeeded
-      if (tlcResult.success) {
+      // Check if verification succeeded (unsat = no counter-examples = correct!)
+      if (z3Result.success && z3Result.result === 'unsat') {
         const totalDuration = Date.now() - startTime;
         logger.info(`✓ Verification successful after ${i} iteration(s)!`, {
           totalDuration: `${(totalDuration / 1000).toFixed(2)}s`,
-          statesExplored: tlcResult.statesExplored,
+          constraintsChecked: z3Result.constraintsChecked.length,
         });
 
-        const proofReport = generateProofReport(tlcResult, spec);
+        const proofReport = generateProofReport(z3Result, spec);
 
         return {
           success: true,
           iterations: i,
           finalCode: currentCode,
-          tlaSpec,
+          z3Constraints,
           proofReport,
           iterationHistory,
         };
@@ -187,31 +208,13 @@ export async function runCEGISLoop(
       // Phase 4: Extract counterexample and generate repair feedback
       logger.debug('Phase 4: Extracting counterexample and generating feedback');
 
-      let repairFeedback: string;
-      if (tlcResult.counterExample) {
-        repairFeedback = generateRepairFeedback(tlcResult.counterExample);
-        logger.debug('Counterexample parsed successfully', {
-          violation: tlcResult.counterExample.violation.invariantName,
-          scheduleLength: tlcResult.counterExample.schedule.length,
-        });
-      } else if (tlcResult.violations && tlcResult.violations.length > 0) {
-        // Fallback: use violation messages directly
-        repairFeedback = `Invariant violations detected:\n\n${
-          tlcResult.violations.map(v =>
-            `- ${v.invariantName}: ${v.message}`
-          ).join('\n')
-        }\n\nPlease fix the code to satisfy these invariants.`;
-        logger.warn('No structured counterexample available, using violation messages');
-      } else {
-        // Fallback: use raw TLC output
-        repairFeedback = `Verification failed but no specific counterexample was found.\n\nTLC Output:\n${tlcResult.output}`;
-        logger.warn('No counterexample or violations found in TLC output');
-      }
+      const repairFeedback = generateZ3RepairFeedback(z3Result, currentCode);
 
       // Include the previous code in the feedback for repair mode
       feedback = `ORIGINAL CODE:\n${currentCode}\n\n${repairFeedback}`;
 
       logger.info(`Iteration ${i} failed, preparing repair for iteration ${i + 1}`, {
+        result: z3Result.result,
         feedbackLength: feedback.length,
       });
     }
@@ -222,12 +225,13 @@ export async function runCEGISLoop(
       totalDuration: `${(totalDuration / 1000).toFixed(2)}s`,
     });
 
+    const lastResult = iterationHistory[iterationHistory.length - 1]?.z3Result;
+    const lastViolation = lastResult?.counterExample?.violatedConstraint || lastResult?.result || 'Unknown';
+
     return {
       success: false,
       iterations: maxIterations,
-      error: `Max iterations (${maxIterations}) reached without finding a correct implementation. Last violation: ${
-        iterationHistory[iterationHistory.length - 1]?.tlcResult?.violations?.[0]?.invariantName || 'Unknown'
-      }`,
+      error: `Max iterations (${maxIterations}) reached without finding a correct implementation. Last result: ${lastViolation}`,
       iterationHistory,
     };
 

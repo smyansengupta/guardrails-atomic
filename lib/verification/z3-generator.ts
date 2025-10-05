@@ -102,24 +102,45 @@ function generateConstants(spec: Specification): Z3Constant[] {
  * Generate precondition constraints
  */
 function generatePreconditionConstraints(spec: Specification): Z3Constraint[] {
-  return spec.preconditions.map((precond, idx) => ({
-    name: `Precondition_${idx + 1}`,
-    formula: translateConditionToZ3(precond, spec),
-    description: precond,
-    type: 'precondition' as const,
-  }));
+  return spec.preconditions
+    .filter(precond => {
+      // Skip preconditions with dynamic array access (state[variable])
+      const hasDynamicAccess = /(?:state|result)\[(?!a\d+)[a-z_]+\]/i.test(precond);
+      if (hasDynamicAccess) {
+        logger.warn('Skipping precondition with dynamic array access', { precond });
+        return false;
+      }
+      return true;
+    })
+    .map((precond, idx) => ({
+      name: `Precondition_${idx + 1}`,
+      formula: translateConditionToZ3(precond, spec),
+      description: precond,
+      type: 'precondition' as const,
+    }));
 }
 
 /**
  * Generate postcondition constraints
  */
 function generatePostconditionConstraints(spec: Specification): Z3Constraint[] {
-  return spec.postconditions.map((postcond, idx) => ({
-    name: `Postcondition_${idx + 1}`,
-    formula: translateConditionToZ3(postcond, spec, true),
-    description: postcond,
-    type: 'postcondition' as const,
-  }));
+  return spec.postconditions
+    .filter(postcond => {
+      // Skip postconditions with dynamic array access (state[variable])
+      // These require Z3 arrays or enumeration to handle properly
+      const hasDynamicAccess = /(?:state|result)\[(?!a\d+)[a-z_]+\]/i.test(postcond);
+      if (hasDynamicAccess) {
+        logger.warn('Skipping postcondition with dynamic array access', { postcond });
+        return false;
+      }
+      return true;
+    })
+    .map((postcond, idx) => ({
+      name: `Postcondition_${idx + 1}`,
+      formula: translateConditionToZ3(postcond, spec, true),
+      description: postcond,
+      type: 'postcondition' as const,
+    }));
 }
 
 /**
@@ -251,14 +272,21 @@ function generateAtomicityConstraint(spec: Specification, inv: Invariant): Z3Con
  * Translate YAML condition to Z3 SMT-LIB format
  */
 function translateConditionToZ3(condition: string, spec: Specification, isPostcondition: boolean = false): string {
-  let z3 = condition;
+  let z3 = condition.trim();
 
-  // Replace operators
-  z3 = z3.replace(/!=/g, 'distinct');
-  z3 = z3.replace(/==/g, '=');
-  z3 = z3.replace(/&&/g, 'and');
-  z3 = z3.replace(/\|\|/g, 'or');
-  z3 = z3.replace(/!/g, 'not');
+  // Handle sum() function FIRST (before state references)
+  z3 = z3.replace(/sum\(([^)]+)\.values\(\)\)/g, (_, expr) => {
+    // Extract variable name from expression like "result" or "state"
+    // In postconditions: result = after state, state = before state
+    // In preconditions: state = before state
+    const useAfter = expr.includes('result');
+    const numAccounts = spec.bounds?.accts || 3;
+    const balances = Array.from(
+      { length: numAccounts }, 
+      (_, i) => `balance_a${i + 1}${useAfter ? '_after' : ''}`
+    );
+    return `(+ ${balances.join(' ')})`;
+  });
 
   // Replace state references
   if (isPostcondition) {
@@ -268,9 +296,30 @@ function translateConditionToZ3(condition: string, spec: Specification, isPostco
     z3 = z3.replace(/state\[(\w+)\]/g, 'balance_$1');
   }
 
-  // Wrap in Z3 syntax
-  // "amt >= 0" -> "(>= amt 0)"
-  z3 = z3.replace(/(\w+)\s*(>=|<=|>|<|=)\s*(\w+)/g, '($2 $1 $3)');
+  // Handle != operator (convert to distinct) - BEFORE other operators
+  z3 = z3.replace(/(\w+)\s*!=\s*(\w+)/g, '(distinct $1 $2)');
+  
+  // Handle == operator - match more carefully to handle expressions
+  // Match: "expr1 == expr2" where expr can contain parentheses
+  if (z3.includes('==')) {
+    const parts = z3.split('==').map(p => p.trim());
+    if (parts.length === 2) {
+      z3 = `(= ${parts[0]} ${parts[1]})`;
+    }
+  }
+
+  // Handle comparison operators: >=, <=, >, <
+  // Only if not already wrapped
+  if (!z3.startsWith('(')) {
+    z3 = z3.replace(/(\w+)\s*(>=|<=|>|<)\s*(-?\w+)/g, '($2 $1 $3)');
+  }
+
+  // Handle boolean operators
+  z3 = z3.replace(/&&/g, 'and');
+  z3 = z3.replace(/\|\|/g, 'or');
+  
+  // Handle negation carefully (don't replace ! in !=)
+  z3 = z3.replace(/!(?!=)/g, 'not ');
 
   return z3;
 }

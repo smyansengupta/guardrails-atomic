@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { currentUser } from '@clerk/nextjs/server';
 import { parseSpec } from '@/lib/core/spec-parser';
-import { generateTLAModule, tlaModuleToString, generateTLCConfig } from '@/lib/verification/tla-generator';
+import { generateZ3Module, z3ModuleToString, generateZ3Config } from '@/lib/verification/z3-generator';
 import { saveVerificationLog } from '@/lib/history/persistence';
 import { logger } from '@/lib/utils/logger';
 
@@ -11,7 +11,7 @@ export interface GenerateTLARequest {
 
 export interface GenerateTLAResponse {
   success: boolean;
-  tlaSpec?: string;
+  tlaSpec?: string; // Actually Z3 constraints (kept for backward compatibility with frontend)
   tlaConfig?: string;
   error?: string;
 }
@@ -40,26 +40,26 @@ export async function POST(request: NextRequest) {
     specName = spec.name;
     startedAt = Date.now();
 
-    logger.info('Generating TLA+ specification', {
+    logger.info('Generating Z3 SMT specification', {
       userId,
       specName,
     });
 
-    // Generate TLA+ spec and config
-    const tlaModule = await generateTLAModule(spec);
-    const tlaSpec = tlaModuleToString(tlaModule);
-    const tlaConfig = await generateTLCConfig(spec);
+    // Generate Z3 constraints and config
+    const z3Module = generateZ3Module(spec);
+    const z3Constraints = z3ModuleToString(z3Module);
+    const z3Config = generateZ3Config(spec);
 
-    logger.info('TLA+ generation successful', {
+    logger.info('Z3 constraint generation successful', {
       userId,
       specName,
-      tlaLength: tlaSpec.length,
-      configLength: tlaConfig.length,
+      constraintsLength: z3Constraints.length,
+      configLength: z3Config.length,
     });
 
-    // Log the generated TLA+ for debugging
-    logger.debug('Generated TLA+ specification:\n' + '='.repeat(80) + '\n' + tlaSpec + '\n' + '='.repeat(80));
-    logger.debug('Generated TLC config:\n' + '='.repeat(80) + '\n' + tlaConfig + '\n' + '='.repeat(80));
+    // Log the generated Z3 constraints for debugging
+    logger.debug('Generated Z3 constraints:\n' + '='.repeat(80) + '\n' + z3Constraints + '\n' + '='.repeat(80));
+    logger.debug('Generated Z3 config:\n' + '='.repeat(80) + '\n' + z3Config + '\n' + '='.repeat(80));
 
     if (userId) {
       try {
@@ -73,21 +73,21 @@ export async function POST(request: NextRequest) {
           result: {
             success: true,
             iterations: 0,
-            tlaSpec,
+            z3Constraints,
           },
         });
       } catch (historyError) {
-        console.warn('Failed to persist TLA+ generation history:', historyError);
+        console.warn('Failed to persist Z3 generation history:', historyError);
       }
     }
 
     return NextResponse.json<GenerateTLAResponse>({
       success: true,
-      tlaSpec,
-      tlaConfig,
+      tlaSpec: z3Constraints, // Use field name for backward compatibility
+      tlaConfig: z3Config,
     });
   } catch (error) {
-    console.error('TLA+ generation error:', error);
+    console.error('Z3 constraint generation error:', error);
 
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
@@ -107,7 +107,7 @@ export async function POST(request: NextRequest) {
           },
         });
       } catch (historyError) {
-        console.warn('Failed to persist TLA+ generation failure:', historyError);
+        console.warn('Failed to persist Z3 generation failure:', historyError);
       }
     }
 
