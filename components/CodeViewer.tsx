@@ -10,7 +10,7 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 interface CodeViewerProps {
   code: string;
-  language?: 'typescript' | 'tlaplus';
+  language?: 'typescript' | 'tlaplus' | 'smt';
   title?: string;
 }
 
@@ -28,7 +28,7 @@ export function CodeViewer({
   };
 
   const handleDownload = () => {
-    const extension = language === 'tlaplus' ? 'tla' : 'ts';
+    const extension = language === 'tlaplus' ? 'tla' : language === 'smt' ? 'smt2' : 'ts';
     const blob = new Blob([code], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -56,7 +56,7 @@ export function CodeViewer({
       </CardHeader>
       <CardContent className="bg-gray-900 text-gray-100 rounded-b-lg p-0">
         <SyntaxHighlighter
-          language={language === 'tlaplus' ? 'text' : 'typescript'}
+          language={language === 'tlaplus' ? 'text' : language === 'smt' ? 'lisp' : 'typescript'}
           style={vscDarkPlus}
           customStyle={{
             margin: 0,

@@ -76,8 +76,8 @@ export default function VerifyPage() {
       try {
         // Simulate progress steps (in real implementation, this would be from server-sent events)
         setTimeout(() => setProgress('Generating TypeScript code...'), 500);
-        setTimeout(() => setProgress('Translating to TLA+ formal model...'), 1500);
-        setTimeout(() => setProgress('Running TLC model checker...'), 3000);
+        setTimeout(() => setProgress('Translating to Z3 SMT constraints...'), 1500);
+        setTimeout(() => setProgress('Running Z3 SMT solver...'), 3000);
 
         const response = await fetch('/api/verify', {
           method: 'POST',
@@ -127,6 +127,38 @@ export default function VerifyPage() {
       }
     } catch (error) {
       setError(error instanceof Error ? error.message : 'Code generation failed');
+    } finally {
+      setLoading(false);
+      setProgress('');
+    }
+  };
+
+  const handleZ3GenOnly = async () => {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setProgress('Generating Z3/SMT specification...');
+
+    try {
+      const response = await fetch('/api/generate-tla', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ spec: generatedYaml || spec }),
+      });
+
+      const data = await response.json();
+      if (data.success && data.tlaSpec) {
+        // Create a minimal result for display with Z3/SMT spec
+        setResult({
+          success: true,
+          iterations: 1,
+          tlaSpec: data.tlaSpec,
+        });
+      } else {
+        setError(data.error || 'Z3 generation failed');
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Z3 generation failed');
     } finally {
       setLoading(false);
       setProgress('');
@@ -240,6 +272,9 @@ export default function VerifyPage() {
               <Button onClick={handleCodeGenOnly} disabled={loading || (!spec && !generatedYaml)} variant="outline" className="flex-1">
                 {loading ? <Spinner size="xs" /> : 'Generate Code Only'}
               </Button>
+              <Button onClick={handleZ3GenOnly} disabled={loading || (!spec && !generatedYaml)} variant="outline" className="flex-1">
+                {loading ? <Spinner size="xs" /> : 'Generate Z3 Only'}
+              </Button>
             </div>
           </CardContent>
         </Card>
@@ -259,22 +294,38 @@ export default function VerifyPage() {
         )}
 
         {/* Success Display */}
-        {((result && result.success) || (streamState.result && streamState.result.success)) && (
-          <Alert className="mt-4 border-green-200 bg-green-50 text-green-800">
-            <CheckCircle2 className="h-4 w-4 text-green-600" />
-            <AlertTitle>Verification Successful!</AlertTitle>
-            <AlertDescription>
-              Code verified in {(result || streamState.result)!.iterations} iteration{(result || streamState.result)!.iterations !== 1 ? 's' : ''}.
-              {(result || streamState.result)!.proofReport && ` Explored ${(result || streamState.result)!.proofReport!.statesExplored.toLocaleString()} states.`}
-            </AlertDescription>
-          </Alert>
-        )}
+        {((result && result.success) || (streamState.result && streamState.result.success)) && (() => {
+          const activeResult = result || streamState.result;
+          const statesExplored = activeResult?.proofReport?.statesExplored;
+          return (
+            <Alert className="mt-4 border-green-200 bg-green-50 text-green-800">
+              <CheckCircle2 className="h-4 w-4 text-green-600" />
+              <AlertTitle>Verification Successful!</AlertTitle>
+              <AlertDescription>
+                Code verified in {activeResult!.iterations} iteration{activeResult!.iterations !== 1 ? 's' : ''}.
+                {statesExplored !== undefined && ` Explored ${statesExplored.toLocaleString()} states.`}
+              </AlertDescription>
+            </Alert>
+          );
+        })()}
 
         {/* Results Display */}
         {(result || streamState.result) && (
           <div className="space-y-8 mt-8">
             {(result || streamState.result)!.finalCode && (
-              <CodeViewer code={(result || streamState.result)!.finalCode!} />
+              <CodeViewer 
+                code={(result || streamState.result)!.finalCode!} 
+                language="typescript" 
+                title="Generated TypeScript Code" 
+              />
+            )}
+
+            {(result || streamState.result)!.tlaSpec && (
+              <CodeViewer 
+                code={(result || streamState.result)!.tlaSpec!} 
+                language="smt" 
+                title="Generated Z3 SMT Specification" 
+              />
             )}
 
             {(result || streamState.result)!.iterationHistory && (

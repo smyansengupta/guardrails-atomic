@@ -171,8 +171,6 @@ export async function runTLC(
     // Mount the work directory and run TLC on the spec
     let dockerCommand: string;
 
-    const tlcCommand = `java -cp /opt/tla2tools.jar tlc2.TLC -config ${moduleName}.cfg ${moduleName}.tla`;
-
     if (usingNamedVolume) {
       const relativeDir = path.basename(workDir);
       const workdirInContainer = path.posix.join(
@@ -185,7 +183,8 @@ export async function runTLC(
         `-v ${volumeName}:${containerWorkdir}`,
         `--workdir ${workdirInContainer}`,
         imageName,
-        tlcCommand,
+        '-config', `${moduleName}.cfg`,
+        `${moduleName}.tla`,
       ].join(' ');
     } else {
       const containerMountPath = '/workspace';
@@ -194,7 +193,8 @@ export async function runTLC(
         `-v "${workDir}:${containerMountPath}"`,
         `--workdir ${containerMountPath}`,
         imageName,
-        tlcCommand,
+        '-config', `${moduleName}.cfg`,
+        `${moduleName}.tla`,
       ].join(' ');
     }
 
