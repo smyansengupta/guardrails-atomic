@@ -1,0 +1,17 @@
+The previous implementation violated an invariant. Here are the details:
+
+ORIGINAL CODE:
+{{code}}
+
+TLA+ MODEL CHECKER FOUND THIS BUG:
+{{violation}}
+
+COUNTEREXAMPLE TRACE:
+{{trace}}
+
+SUGGESTED FIX:
+{{suggestion}}
+
+Generate a corrected version of the TypeScript code that fixes this bug while maintaining all other invariants.
+
+Return ONLY the corrected TypeScript code, no explanation.

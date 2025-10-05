@@ -1,0 +1,29 @@
+name: idempotent_write
+signature:
+  params:
+    - name: state
+      type: Map<Key,Value>
+    - name: key
+      type: Key
+    - name: value
+      type: Value
+    - name: req_id
+      type: UUID
+  returnType: Map<Key,Value>
+preconditions:
+  - key != null
+  - value != null
+postconditions:
+  - result[key] == value
+  - forall k in state.keys() where k != key => result[k] == state[k]
+invariants:
+  - type: idempotent
+    params:
+      key: req_id
+faultModel:
+  delivery: at_least_once
+  reorder: false
+  crash_restart: true
+bounds:
+  keys: 5
+  retries: 3

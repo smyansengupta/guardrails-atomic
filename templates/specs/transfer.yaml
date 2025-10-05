@@ -1,0 +1,35 @@
+name: transfer_atomic
+signature:
+  params:
+    - name: state
+      type: Map<Acct,int>
+    - name: from
+      type: Acct
+    - name: to
+      type: Acct
+    - name: amt
+      type: int
+    - name: req_id
+      type: UUID
+  returnType: Map<Acct,int>
+preconditions:
+  - amt >= 0
+  - from != to
+  - state[from] >= amt
+postconditions:
+  - sum(result.values()) == sum(state.values())
+  - result[from] == state[from] - amt
+  - result[to] == state[to] + amt
+invariants:
+  - type: idempotent
+    params:
+      key: req_id
+  - type: no_double_spend
+  - type: conservation
+faultModel:
+  delivery: at_least_once
+  reorder: true
+  crash_restart: true
+bounds:
+  accts: 3
+  retries: 2

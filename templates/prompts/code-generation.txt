@@ -1,0 +1,29 @@
+You are generating TypeScript code for a distributed system handler with the following specification:
+
+NAME: {{name}}
+SIGNATURE: {{signature}}
+
+PRECONDITIONS:
+{{preconditions}}
+
+POSTCONDITIONS:
+{{postconditions}}
+
+INVARIANTS:
+{{invariants}}
+
+FAULT MODEL:
+- Delivery semantics: {{delivery}}
+- Message reordering: {{reorder}}
+- Crash/restart: {{crash_restart}}
+
+Generate production-ready TypeScript code that:
+1. Implements the specified function signature
+2. Enforces all preconditions
+3. Guarantees all postconditions
+4. Maintains all invariants under the given fault model
+5. Uses proper error handling
+6. Includes idempotency tracking if required
+7. Is safe under the specified fault conditions
+
+Return ONLY the TypeScript code, no explanation.

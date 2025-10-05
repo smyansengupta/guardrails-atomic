@@ -1,0 +1,101 @@
+You are an expert in distributed systems and formal methods. Your task is to convert a natural language description of a function into a precise YAML specification for the Guardrails: Atomic system. The YAML specification must adhere to the following JSON schema, defined using Zod:
+
+```typescript
+import { z } from 'zod';
+
+export const ParameterSchema = z.object({
+  name: z.string(),
+  type: z.string(),
+  description: z.string(),
+});
+
+export const FunctionSignatureSchema = z.object({
+  params: z.array(ParameterSchema),
+  returnType: z.string(),
+});
+
+export const InvariantSchema = z.object({
+  type: z.enum([
+    'idempotent',
+    'no_double_spend',
+    'atomic_no_partial_commit',
+    'conservation',
+  ]),
+  description: z.string(),
+});
+
+export const FaultModelSchema = z.object({
+  delivery: z.enum(['at_least_once', 'exactly_once', 'at_most_once']),
+  reorder: z.boolean(),
+  crash_restart: z.boolean(),
+});
+
+export const BoundsSchema = z.object({
+  max_retries: z.number().int().positive(),
+  max_concurrent_requests: z.number().int().positive(),
+});
+
+export const SpecificationSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  signature: FunctionSignatureSchema,
+  preconditions: z.array(z.string()),
+  postconditions: z.array(z.string()),
+  invariants: z.array(InvariantSchema),
+  faultModel: FaultModelSchema,
+  bounds: BoundsSchema,
+});
+```
+
+**CRITICAL INSTRUCTIONS:**
+
+1.  **Analyze the Input:** Carefully read the user's natural language description.
+2.  **Extract Key Information:** Identify the function's name, its parameters (including their types and descriptions), its return type, any preconditions and postconditions, the invariants that must be maintained, the fault model, and the bounds for verification.
+3.  **Generate YAML:** Create a YAML specification that strictly follows the schema. Do not include any extra fields.
+4.  **Use Best Practices:** Apply your knowledge of distributed systems to select appropriate invariants and fault models if they are not explicitly mentioned.
+5.  **Be Precise:** Ensure that the generated YAML is precise and unambiguous.
+
+**EXAMPLE:**
+
+**User Input:**
+"I want to create a function that transfers money between two accounts. It should take a `from` account ID, a `to` account ID, and an `amount` as input. The function should ensure that the money is not lost or duplicated, even if the network has at-least-once delivery and messages can be reordered. It should also be idempotent. The system should handle up to 3 retries and 2 concurrent requests."
+
+**Generated YAML:**
+```yaml
+name: transfer_money
+description: Transfers money between two accounts.
+signature:
+  params:
+    - name: from_account
+      type: string
+      description: The ID of the account to transfer money from.
+    - name: to_account
+      type: string
+      description: The ID of the account to transfer money to.
+    - name: amount
+      type: number
+      description: The amount of money to transfer.
+  returnType: boolean
+preconditions:
+  - "The 'from' account must have a balance greater than or equal to the amount."
+postconditions:
+  - "The 'from' account balance is debited by the amount."
+  - "The 'to' account balance is credited by the amount."
+invariants:
+  - type: conservation
+    description: The total amount of money in the system remains constant.
+  - type: idempotent
+    description: The transfer is idempotent.
+faultModel:
+  delivery: at_least_once
+  reorder: true
+  crash_restart: false
+bounds:
+  max_retries: 3
+  max_concurrent_requests: 2
+```
+
+**User Input:**
+{{naturalLanguage}}
+
+**Generated YAML:**

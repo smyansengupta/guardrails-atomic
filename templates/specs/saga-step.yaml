@@ -1,0 +1,31 @@
+name: saga_step
+signature:
+  params:
+    - name: state
+      type: OrderState
+    - name: order_id
+      type: UUID
+    - name: action
+      type: SagaAction
+  returnType: OrderState
+preconditions:
+  - order_id != null
+  - action in ['reserve', 'confirm', 'compensate']
+postconditions:
+  - result.order_id == order_id
+  - action == 'reserve' => result.status == 'reserved'
+  - action == 'confirm' => result.status == 'confirmed'
+  - action == 'compensate' => result.status == 'cancelled'
+invariants:
+  - type: idempotent
+    params:
+      key: order_id
+  - type: atomic_no_partial_commit
+faultModel:
+  delivery: at_least_once
+  reorder: true
+  crash_restart: true
+bounds:
+  orders: 3
+  retries: 2
+  messages: 10
