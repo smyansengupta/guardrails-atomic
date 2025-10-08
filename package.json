@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "predev": "tsx scripts/copy-z3-wasm.ts || true",
-    "dev": "next dev",
+    "dev": "tsx scripts/watch-and-copy-z3.ts & next dev",
     "prebuild": "tsx scripts/copy-z3-wasm.ts || true",
     "build": "next build",
     "start": "next start",

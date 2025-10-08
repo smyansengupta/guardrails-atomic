@@ -14,7 +14,8 @@ const __dirname = path.dirname(__filename);
 
 const sourceDir = path.join(__dirname, '..', 'node_modules', 'z3-solver', 'build');
 const publicDir = path.join(__dirname, '..', 'public', 'z3');
-const nextServerDir = path.join(__dirname, '..', '.next', 'server', 'vendor-chunks');
+const nextServerVendorDir = path.join(__dirname, '..', '.next', 'server', 'vendor-chunks');
+const nextServerChunksDir = path.join(__dirname, '..', '.next', 'server', 'chunks');
 
 console.log('📦 Setting up Z3 WASM files...');
 
@@ -24,10 +25,13 @@ if (!fs.existsSync(publicDir)) {
   console.log('✓ Created public/z3 directory');
 }
 
-// Create .next/server/vendor-chunks directory if it exists (for running builds)
+// Create .next/server directories if they exist (for running builds)
+const nextServerDirs = [nextServerVendorDir, nextServerChunksDir];
 if (fs.existsSync(path.join(__dirname, '..', '.next', 'server'))) {
-  if (!fs.existsSync(nextServerDir)) {
-    fs.mkdirSync(nextServerDir, { recursive: true });
+  for (const dir of nextServerDirs) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
   }
   console.log('✓ Found .next/server directory');
 }
@@ -52,10 +56,12 @@ try {
       const publicDestPath = path.join(publicDir, file);
       fs.copyFileSync(sourcePath, publicDestPath);
 
-      // Also copy to .next/server/vendor-chunks if it exists
-      if (fs.existsSync(nextServerDir)) {
-        const nextDestPath = path.join(nextServerDir, file);
-        fs.copyFileSync(sourcePath, nextDestPath);
+      // Also copy to .next/server directories if they exist
+      for (const destDir of [nextServerVendorDir, nextServerChunksDir]) {
+        if (fs.existsSync(destDir)) {
+          const nextDestPath = path.join(destDir, file);
+          fs.copyFileSync(sourcePath, nextDestPath);
+        }
       }
 
       copiedCount++;
@@ -67,8 +73,8 @@ try {
     console.warn('⚠️  No WASM files found in', sourceDir);
   } else {
     console.log(`✅ Successfully copied ${copiedCount} file(s) to public/z3/`);
-    if (fs.existsSync(nextServerDir)) {
-      console.log(`✅ Also copied to .next/server/vendor-chunks/`);
+    if (fs.existsSync(nextServerVendorDir) || fs.existsSync(nextServerChunksDir)) {
+      console.log(`✅ Also copied to .next/server/ directories`);
     }
   }
 } catch (error) {
