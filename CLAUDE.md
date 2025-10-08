@@ -20,7 +20,7 @@ This document contains all the information needed to understand and contribute t
 
 ## Project Overview
 
-**Guardrails: Atomic** is an AI-powered code generation assistant that produces distributed system handlers with **formal correctness guarantees** using CEGIS (Counter-Example Guided Inductive Synthesis) with TLA+ model checking.
+**Guardrails: Atomic** is an AI-powered code generation assistant that produces distributed system handlers with **formal correctness guarantees** using CEGIS (Counter-Example Guided Inductive Synthesis) with Z3 SMT solver.
 
 ### What Problem Does It Solve?
 
@@ -34,12 +34,12 @@ Guardrails: Atomic **automatically generates and verifies** TypeScript handlers 
 
 ### Technology Stack
 
-- **Frontend/Backend**: Next.js 14 (App Router)
-- **Language**: TypeScript
+- **Frontend/Backend**: Next.js 15 (App Router)
+- **Language**: TypeScript (100%)
 - **Styling**: Tailwind CSS
 - **Package Manager**: pnpm
 - **LLM**: OpenRouter GPT-4
-- **Formal Verification**: TLA+ with TLC model checker (Docker)
+- **Formal Verification**: Z3 SMT Solver (z3-solver npm package)
 - **Testing**: Vitest
 - **Authentication**: Clerk
 - **Database**: MongoDB Atlas (user sessions & history)
@@ -53,8 +53,8 @@ Guardrails: Atomic **automatically generates and verifies** TypeScript handlers 
 CEGIS is an iterative synthesis approach:
 
 1. **Synthesize**: Generate candidate code using LLM
-2. **Verify**: Check code against formal specification using TLA+/TLC
-3. **Counterexample**: If bugs found, extract execution trace showing violation
+2. **Verify**: Check code against formal specification using Z3 SMT solver
+3. **Counterexample**: If bugs found, extract model showing violation
 4. **Refine**: Use counterexample to guide LLM to fix the code
 5. **Repeat**: Continue until verified or max iterations reached
 
@@ -73,18 +73,21 @@ CEGIS is an iterative synthesis approach:
                             ▼
                     ┌──────────────┐
                     │  Translate   │
-                    │  to TLA+     │
+                    │  to Z3       │
+                    │  (SMT-LIB)   │
                     └──────┬───────┘
                             │
                             ▼
                     ┌──────────────┐     ┌─────────────┐
-                    │     TLC      │────▶│  Verified!  │
-                    │    Verify    │ ✓   └─────────────┘
-                    └──────┬───────┘
+                    │      Z3      │────▶│  Verified!  │
+                    │   Solver     │ ✓   │   (unsat)   │
+                    └──────┬───────┘     └─────────────┘
                             │ ✗
+                            │ (sat)
                             ▼
                     ┌──────────────┐
                     │Counterexample│
+                    │   (model)    │
                     └──────┬───────┘
                             │
                             ▼
@@ -94,14 +97,43 @@ CEGIS is an iterative synthesis approach:
                     └──────────────┘
 ```
 
-### 2. TLA+ (Temporal Logic of Actions)
+### 2. Z3 SMT Solver
 
-TLA+ is a formal specification language used to model and verify concurrent systems. Key concepts:
+Z3 is a Satisfiability Modulo Theories (SMT) solver developed by Microsoft Research. It can check whether logical formulas are satisfiable or prove they are unsatisfiable.
 
-- **Variables**: System state (e.g., `balances`, `processed`)
-- **Actions**: State transitions (e.g., `Transfer`, `DuplicateTransfer`)
-- **Invariants**: Properties that must always hold (e.g., conservation, idempotency)
-- **Temporal formulas**: Properties over execution traces
+**Key Concepts**:
+
+- **SMT-LIB Format**: Standard input format for Z3 (e.g., `(assert (>= balance 0))`)
+- **Sorts**: Types in Z3 (Int, Bool, String, custom types)
+- **Constants**: Variables in the problem (e.g., `balance_a1`, `amt`)
+- **Assertions**: Constraints that must hold (preconditions, postconditions, invariants)
+- **check-sat**: Ask Z3 to check satisfiability
+- **get-model**: Extract counterexample when satisfiable
+
+**Result Semantics**:
+- **`sat`** = Found a counterexample = **BUG EXISTS** ❌
+- **`unsat`** = No counterexample exists = **CODE VERIFIED** ✅
+- **`unknown`** = Z3 couldn't decide (timeout/complexity)
+
+**Example SMT-LIB**:
+```smt
+; Declare variables
+(declare-const balance_a1 Int)
+(declare-const amt Int)
+
+; Assert preconditions
+(assert (>= balance_a1 amt))
+(assert (>= amt 0))
+
+; Assert postcondition violation (looking for bugs)
+(assert (not (>= (- balance_a1 amt) 0)))
+
+; Check satisfiability
+(check-sat)
+(get-model)
+```
+
+If Z3 returns `unsat`, the postcondition cannot be violated → code is correct!
 
 ### 3. Fault Models
 
@@ -119,7 +151,7 @@ The system supports various fault scenarios:
 Supported invariant types:
 
 - **`idempotent`**: Repeated execution with same request ID has no additional effect
-- **`no_double_spend`**: Resources cannot be spent twice
+- **`no_double_spend`**: Resources cannot be spent twice (balances stay non-negative)
 - **`atomic_no_partial_commit`**: Either all state changes happen or none
 - **`conservation`**: Total amount of resources remains constant
 
@@ -158,32 +190,34 @@ User YAML Spec
 │  Iteration Loop (max 8 times)      │
 │                                     │
 │  1. [code-generator.ts]             │
-│     → Call OpenRouter with prompt       │
+│     → Call OpenRouter with prompt   │
 │     → Get TypeScript code           │
 │                                     │
-│  2. [tla-generator.ts]              │
-│     → Convert spec to TLA+ AST      │
-│     → Serialize to TLA+ string      │
+│  2. [z3-generator.ts]               │
+│     → Convert spec to Z3 AST        │
+│     → Generate SMT-LIB constraints  │
+│     → Serialize to SMT-LIB string   │
 │                                     │
-│  3. [tlc-runner.ts]                 │
-│     → Write TLA+ to file            │
-│     → Run TLC in Docker             │
-│     → Parse output                  │
+│  3. [z3-runner.ts]                  │
+│     → Initialize z3-solver          │
+│     → Load SMT-LIB constraints      │
+│     → Run Z3 solver                 │
+│     → Parse result (sat/unsat)      │
 │                                     │
-│  4. If violations:                  │
+│  4. If sat (bug found):             │
 │     [counterexample-parser.ts]      │
-│     → Extract trace                 │
+│     → Extract model from Z3         │
 │     → Generate feedback             │
 │     → Go to step 1 with feedback    │
 │                                     │
-│  5. If verified:                    │
+│  5. If unsat (verified):            │
 │     → Return success + proof report │
 └─────────────────────────────────────┘
       ↓
 API Response to Frontend
 ```
 
-#### Authentication & Session Management *(planned)*
+#### Authentication & Session Management
 ```
 Visitor
       ↓
@@ -196,7 +230,7 @@ Clerk session issued → cookie-based JWT
 Server actions/API routes call `auth()` → userId for db operations
 ```
 
-#### Verification History Persistence *(planned)*
+#### Verification History Persistence
 ```
 Authenticated verification request
       ↓
@@ -212,7 +246,7 @@ MongoDB `verification_logs` collection
 ### Directory Structure
 
 ```
-guardrails/
+guardrails-atomic/
 ├── app/                          # Next.js App Router
 │   ├── api/                      # API routes
 │   │   ├── verify/               # Main verification endpoint
@@ -220,69 +254,78 @@ guardrails/
 │   │   ├── examples/             # Example specs endpoint
 │   │   ├── generate-spec/        # NL to YAML endpoint
 │   │   ├── history/              # (planned) Fetch saved verification runs
-│   │   └── auth/[...clerk]/      # Clerk webhooks & callbacks (planned)
-│   ├── (auth)/                   # (planned) Clerk sign-in/up routes
-│   │   ├── sign-in/              # Hosted UI wrapper
+│   │   └── auth/[...clerk]/      # Clerk webhooks & callbacks
+│   ├── (auth)/                   # Clerk sign-in/up routes
+│   │   ├── sign-in/
 │   │   └── sign-up/
-│   ├── dashboard/                # (planned) Authenticated views
+│   ├── dashboard/                # Authenticated views
 │   │   └── history/              # Saved prompts & results
 │   ├── verify/                   # Verification UI page
 │   ├── examples/                 # Examples gallery page
 │   ├── generate-spec/            # NL to YAML UI page
-│   │   └── page.tsx
-│   ├── layout.tsx                # Root layout with new Nav Bar
+│   ├── layout.tsx                # Root layout with Nav Bar
 │   ├── page.tsx                  # Landing page
 │   └── globals.css               # Global styles
 │
-├── components/               # React components
-│   ├── SpecEditor.tsx        # YAML input
-│   ├── CodeViewer.tsx        # Code display
-│   ├── ProofReport.tsx       # Verification results
-│   ├── IterationHistory.tsx  # CEGIS timeline
-│   ├── TraceVisualizer.tsx   # Counterexample display
-│   ├── SpecGenerator.tsx     # New: NL to YAML component
-│   └── ui/                   # Base UI components
+├── components/                   # React components
+│   ├── SpecEditor.tsx            # YAML input
+│   ├── CodeViewer.tsx            # Code display
+│   ├── ProofReport.tsx           # Verification results
+│   ├── IterationHistory.tsx      # CEGIS timeline
+│   ├── TraceVisualizer.tsx       # Counterexample display
+│   ├── SpecGenerator.tsx         # NL to YAML component
+│   └── ui/                       # Base UI components
 │
-├── lib/                      # Core business logic
-│   ├── core/                 # Main CEGIS logic
-│   │   ├── cegis-loop.ts     # Orchestration
-│   │   ├── spec-parser.ts    # YAML parsing
-│   │   └── code-generator.ts # LLM code gen
-│   ├── verification/         # TLA+ & verification
-│   │   ├── tla-generator.ts  # Spec → TLA+
-│   │   ├── tlc-runner.ts     # TLC execution
+├── lib/                          # Core business logic
+│   ├── core/                     # Main CEGIS logic
+│   │   ├── cegis-loop.ts         # Orchestration
+│   │   ├── spec-parser.ts        # YAML parsing
+│   │   └── code-generator.ts     # LLM code gen
+│   ├── verification/             # Z3 & verification
+│   │   ├── z3-generator.ts       # Spec → Z3 SMT-LIB
+│   │   ├── z3-runner.ts          # Z3 execution
 │   │   └── counterexample-parser.ts
-│   ├── history/              # (planned) Persistence & queries
-│   │   └── persistence.ts    # Upsert & fetch helpers
-│   ├── db/                   # (planned) Database connections
-│   │   └── mongodb.ts        # MongoDB Atlas client
-│   ├── types/                # TypeScript types
+│   ├── history/                  # Persistence & queries
+│   │   └── persistence.ts        # Upsert & fetch helpers
+│   ├── db/                       # Database connections
+│   │   └── mongodb.ts            # MongoDB Atlas client
+│   ├── types/                    # TypeScript types
 │   │   ├── specification.ts
-│   │   ├── tla-ast.ts
+│   │   ├── z3-ast.ts
 │   │   ├── verification.ts
 │   │   └── api.ts
-│   ├── services/             # External services
+│   ├── services/                 # External services
 │   │   └── openrouter.service.ts
-│   └── utils/                # Utilities
+│   └── utils/                    # Utilities
 │       ├── logger.ts
 │       └── errors.ts
 │
-├── templates/                # Templates for generation
-│   ├── specs/                # Example YAML specs
-│   ├── tla/                  # TLA+ templates
-│   └── prompts/              # LLM prompts
+├── templates/                    # Templates for generation
+│   ├── specs/                    # Example YAML specs
+│   └── prompts/                  # LLM prompts
 │       ├── code-generation.txt
 │       ├── code-repair.txt
-│       └── spec-generation.txt # New: NL to YAML prompt
+│       └── spec-generation.txt
 │
-├── tests/                    # Test suite
-│   ├── unit/                 # Unit tests
-│   ├── integration/          # Integration tests
-│   └── fixtures/             # Test data
+├── tests/                        # Test suite
+│   ├── unit/                     # Unit tests
+│   ├── integration/              # Integration tests
+│   └── fixtures/                 # Test data
 │
-└── docker/                   # Docker configuration
-    ├── tlc/                  # TLC container
-    └── docker-compose.yml
+├── scripts/                      # Build scripts
+│   ├── copy-z3-wasm.ts           # Copy Z3 WASM to public/
+│   └── test-z3.ts                # Test Z3 directly
+│
+├── public/                       # Static assets
+│   └── z3/                       # Z3 WASM files
+│       ├── z3-built.wasm
+│       ├── z3-built.js
+│       ├── browser.js
+│       └── node.js
+│
+└── docs/                         # Documentation
+    ├── ARCHITECTURE.md           # System design
+    └── DEVELOPMENT.md            # Dev guide
 ```
 
 ---
@@ -308,23 +351,32 @@ Key type: `Specification`
 ```
 
 #### `lib/types/verification.ts`
-Defines verification results and TLC output structures.
+Defines verification results and Z3 output structures.
 
 Key types:
 - `VerificationResult` - Final output of CEGIS loop
-- `TLCResult` - Result from TLC model checker
+- `Z3Result` - Result from Z3 solver
 - `CounterExample` - Bug trace with suggested fix
 - `ProofReport` - Verification success summary
+
+#### `lib/types/z3-ast.ts`
+Defines Z3 AST structures for SMT-LIB generation.
+
+Key types:
+- `Z3Module` - Top-level Z3 module
+- `Z3Constant` - Variable declarations
+- `Z3Constraint` - Assertions (preconditions, postconditions, invariants)
+- `Z3Assertion` - Individual assert statements
 
 #### `lib/core/cegis-loop.ts`
 **Main orchestrator**. Implements the CEGIS loop:
 1. Initialize with spec
 2. Loop until verified or max iterations:
    - Generate code (with optional feedback)
-   - Generate TLA+ spec
-   - Run TLC
-   - If violations, extract counterexample and loop
-   - If verified, return success
+   - Generate Z3 constraints
+   - Run Z3 solver
+   - If `sat` (bug found), extract counterexample and loop
+   - If `unsat` (verified), return success
 3. Return result
 
 #### `lib/core/spec-parser.ts`
@@ -341,26 +393,41 @@ Generates TypeScript code using OpenRouter.
 - Extract code from response
 - Handle retries for API failures
 
-#### `lib/verification/tla-generator.ts`
-Converts spec to TLA+ module.
-- Map spec params to TLA+ constants/variables
-- Translate preconditions to `Init` predicate
-- Generate actions for function + fault scenarios
-- Translate invariants to TLA+ predicates
-- Serialize AST to TLA+ string
+#### `lib/verification/z3-generator.ts`
+Converts spec to Z3 SMT-LIB format.
+- Map spec params to Z3 constants (declare-const)
+- Translate preconditions to Z3 assertions
+- Generate postcondition checks
+- Translate invariants to Z3 predicates
+- Handle dynamic array access (enumerate all cases)
+- Convert operators to SMT-LIB prefix notation
+- Serialize to SMT-LIB string
 
-#### `lib/verification/tlc-runner.ts`
-Executes TLC model checker.
-- Write TLA+ spec to temp file
-- Generate TLC config file (`.cfg`)
-- Run Docker container with TLC
-- Parse output for violations
-- Extract state counts, timing, etc.
+**Key Functions**:
+- `generateZ3Module(spec)`: Main entry point
+- `generateConstants(spec)`: Generate variable declarations
+- `translateConditionToZ3(condition, spec, isPostcondition)`: Convert YAML conditions to SMT-LIB
+- `enumerateDynamicArrayAccess(condition, spec, isPostcondition)`: Handle `state[param]` access
+- `translateOperatorsToSMTLib(expr)`: Convert infix to prefix notation
+- `z3ModuleToString(module)`: Serialize to SMT-LIB
+
+#### `lib/verification/z3-runner.ts`
+Executes Z3 solver using z3-solver npm package.
+- Initialize z3-solver with WASM
+- Load SMT-LIB constraints
+- Run solver (check-sat)
+- Parse result (sat/unsat/unknown)
+- Extract model if sat
+- Return structured result
+
+**Key Functions**:
+- `runZ3(smtLib)`: Main entry point
+- `parseSatResult(model)`: Extract counterexample values
 
 #### `lib/verification/counterexample-parser.ts`
-Parses TLC error output.
-- Extract violated invariant name
-- Parse state trace
+Parses Z3 model output.
+- Extract violated constraint name
+- Parse variable assignments from model
 - Convert to structured `CounterExample`
 - Generate human-readable suggested fix
 
@@ -428,9 +495,7 @@ export async function generateCode(
       .replace('{{crash_restart}}', String(spec.faultModel.crash_restart));
 
     if (feedback) {
-      template = template.replace('{{code}}', feedback); // Previous code
       template = template.replace('{{violation}}', feedback);
-      // ... etc
     }
 
     // Call LLM
@@ -450,80 +515,136 @@ function formatSignature(sig: FunctionSignature): string {
 }
 ```
 
-### 3. Implementing `tla-generator.ts`
+### 3. Implementing `z3-generator.ts`
 
 Key steps:
-1. Create TLA+ constants from bounds (e.g., `Accts = {"a1", "a2", "a3"}`)
-2. Create variables from spec params and tracking state
-3. Generate `Init` predicate from preconditions
-4. Generate main action from function signature
-5. Generate fault scenario actions (duplicates, reordering, crashes)
-6. Translate invariants to TLA+ predicates
-7. Generate `Next` relation as disjunction of all actions
+1. Create Z3 constants from spec params and state variables
+2. Generate balance variables (before and after state)
+3. Generate processed request tracking (for idempotency)
+4. Translate preconditions to Z3 assertions
+5. Translate postconditions to Z3 assertions
+6. Generate invariant constraints
+7. Generate fault model constraints
+8. Serialize to SMT-LIB format
 
-Example for idempotency:
-```tla
-Idempotent ==
-    \A req_id \in processed :
-        DuplicateAction(req_id) => UNCHANGED state
+**Example for conservation invariant**:
+```typescript
+function generateConservationConstraint(spec: Specification): Z3Constraint {
+  const numAccounts = spec.bounds?.accts || 3;
+
+  const beforeSum = Array.from({ length: numAccounts }, (_, i) => `balance_a${i + 1}`).join(' ');
+  const afterSum = Array.from({ length: numAccounts }, (_, i) => `balance_a${i + 1}_after`).join(' ');
+
+  const formula = `(= (+ ${beforeSum}) (+ ${afterSum}))`;
+
+  return {
+    name: 'Conservation',
+    formula,
+    description: 'Total resources must be conserved',
+    type: 'invariant',
+  };
+}
 ```
 
-### 4. Implementing `tlc-runner.ts`
+**Key Challenge: Dynamic Array Access**
+
+When spec contains `state[from] >= amt` where `from` is a parameter:
+- Cannot directly represent in Z3 (requires array theory or enumeration)
+- Solution: Enumerate all possible values based on `bounds.accts`
 
 ```typescript
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { writeFile, mkdir } from 'fs/promises';
-import path from 'path';
+// Input: "state[from] >= amt"
+// Output: "(or (and (= from 1) (>= balance_a1 amt))
+//              (and (= from 2) (>= balance_a2 amt))
+//              (and (= from 3) (>= balance_a3 amt)))"
+```
 
-const execAsync = promisify(exec);
+**Key Challenge: Operator Translation**
 
-export async function runTLC(
-  tlaSpec: string,
-  configFile: string
-): Promise<TLCResult> {
-  const workDir = path.join(process.cwd(), 'tla-output', Date.now().toString());
-  await mkdir(workDir, { recursive: true });
+SMT-LIB uses prefix notation, not infix:
+```typescript
+// Input: "balance_a1 >= amt"
+// Output: "(>= balance_a1 amt)"
 
-  const specPath = path.join(workDir, 'Spec.tla');
-  const cfgPath = path.join(workDir, 'Spec.cfg');
+// Input: "from != to"
+// Output: "(distinct from to)"
 
-  await writeFile(specPath, tlaSpec);
-  await writeFile(cfgPath, configFile);
+// Input: "amt >= 0 && from != to"
+// Output: "(and (>= amt 0) (distinct from to))"
+```
 
+### 4. Implementing `z3-runner.ts`
+
+```typescript
+import { init, Z3 } from 'z3-solver';
+import { Z3Result } from '@/lib/types/verification';
+import { logger } from '@/lib/utils/logger';
+
+export async function runZ3(smtLib: string): Promise<Z3Result> {
   try {
-    const { stdout, stderr } = await execAsync(
-      `docker run --rm -v ${workDir}:/workspace guardrails-tlc Spec.tla`,
-      { timeout: 60000 } // 1 minute timeout
-    );
+    // Initialize Z3
+    const { Context } = await init();
+    const ctx = Context('main');
+    const solver = new ctx.Solver();
 
-    const output = stdout + stderr;
+    // Parse SMT-LIB
+    solver.fromString(smtLib);
 
-    // Parse TLC output
-    const success = !output.includes('Error:');
-    const statesMatch = output.match(/(\d+) states generated/);
-    const statesExplored = statesMatch ? parseInt(statesMatch[1]) : 0;
+    // Check satisfiability
+    const result = await solver.check();
 
-    if (success) {
+    logger.debug('Z3 result', { result: result });
+
+    if (result === 'unsat') {
+      // Code is verified!
       return {
         success: true,
-        statesExplored,
-        invariantsChecked: extractInvariants(output),
-        output,
+        result: 'unsat',
+        constraintsChecked: extractConstraints(smtLib),
       };
-    } else {
+    } else if (result === 'sat') {
+      // Bug found - extract model
+      const model = solver.model();
+
       return {
         success: false,
-        statesExplored,
-        invariantsChecked: [],
-        violations: parseViolations(output),
-        counterExample: parseCounterExample(output),
-        output,
+        result: 'sat',
+        counterExample: parseCounterExample(model),
+        model: model.toString(),
+      };
+    } else {
+      // Unknown
+      return {
+        success: false,
+        result: 'unknown',
+        error: 'Z3 returned unknown (timeout or too complex)',
       };
     }
   } catch (error) {
-    throw new TLCExecutionError(`TLC execution failed: ${error}`);
+    logger.error('Z3 execution failed', { error });
+    throw new VerificationError(`Z3 execution failed: ${error}`);
   }
+}
+
+function extractConstraints(smtLib: string): string[] {
+  const lines = smtLib.split('\n');
+  return lines
+    .filter(line => line.trim().startsWith('(assert'))
+    .map(line => line.trim());
+}
+
+function parseCounterExample(model: any): CounterExample {
+  // Extract variable assignments from Z3 model
+  const assignments = model.entries().map(([name, value]) => ({
+    variable: name,
+    value: value.toString(),
+  }));
+
+  return {
+    violatedConstraint: 'Unknown',
+    trace: assignments,
+    suggestedFix: 'Check the model values to identify the bug',
+  };
 }
 ```
 
@@ -544,41 +665,40 @@ export async function runCEGISLoop(
     // 1. Generate code
     currentCode = await generateCode(spec, feedback);
 
-    // 2. Generate TLA+ spec
-    const tlaModule = generateTLAModule(spec);
-    const tlaSpec = tlaModuleToString(tlaModule);
-    const configFile = generateTLCConfig(spec);
+    // 2. Generate Z3 constraints
+    const z3Module = generateZ3Module(spec);
+    const smtLib = z3ModuleToString(z3Module);
 
-    // 3. Run TLC
-    const tlcResult = await runTLC(tlaSpec, configFile);
+    // 3. Run Z3
+    const z3Result = await runZ3(smtLib);
 
     // Record iteration
     iterationHistory.push({
       iteration: i,
       code: currentCode,
-      tlaSpec,
-      tlcResult,
+      z3Spec: smtLib,
+      z3Result,
       feedback,
     });
 
     // 4. Check result
-    if (tlcResult.success) {
+    if (z3Result.success && z3Result.result === 'unsat') {
       // Verification succeeded!
       return {
         success: true,
         iterations: i,
         finalCode: currentCode,
-        tlaSpec,
-        proofReport: generateProofReport(tlcResult, spec),
+        z3Spec: smtLib,
+        proofReport: generateProofReport(z3Result, spec),
         iterationHistory,
       };
     }
 
     // 5. Extract counterexample and generate feedback
-    if (tlcResult.counterExample) {
-      feedback = generateRepairFeedback(tlcResult.counterExample);
+    if (z3Result.counterExample) {
+      feedback = generateRepairFeedback(z3Result.counterExample);
     } else {
-      feedback = tlcResult.output; // Fallback to raw output
+      feedback = z3Result.model || 'Z3 found a violation but no model available';
     }
   }
 
@@ -612,6 +732,23 @@ describe('spec-parser', () => {
     expect(() => parseSpec(invalidYaml)).toThrow(SpecificationError);
   });
 });
+
+// tests/unit/z3-generator.test.ts
+describe('z3-generator', () => {
+  it('should generate valid SMT-LIB', () => {
+    const spec = parseSpec(transferYaml);
+    const module = generateZ3Module(spec);
+    const smtLib = z3ModuleToString(module);
+
+    expect(smtLib).toContain('(declare-const balance_a1 Int)');
+    expect(smtLib).toContain('(assert');
+  });
+
+  it('should translate operators correctly', () => {
+    const translated = translateOperatorsToSMTLib('balance >= amt');
+    expect(translated).toBe('(>= balance amt)');
+  });
+});
 ```
 
 ### Integration Tests
@@ -632,18 +769,19 @@ describe('cegis-loop', () => {
 });
 ```
 
-### Testing TLA+ Generation
+### Testing Z3 Generation
 
-Create known-good TLA+ specs and verify they pass TLC:
+Create known-good Z3 specs and verify they return `unsat`:
 
 ```typescript
-it('should generate TLA+ that passes TLC', async () => {
+it('should generate Z3 that returns unsat', async () => {
   const spec = parseSpec(transferSpec);
-  const tlaModule = generateTLAModule(spec);
-  const tlaString = tlaModuleToString(tlaModule);
+  const z3Module = generateZ3Module(spec);
+  const smtLib = z3ModuleToString(z3Module);
 
-  const tlcResult = await runTLC(tlaString, generateConfig(spec));
-  expect(tlcResult.success).toBe(true);
+  const z3Result = await runZ3(smtLib);
+  expect(z3Result.result).toBe('unsat');
+  expect(z3Result.success).toBe(true);
 });
 ```
 
@@ -655,78 +793,88 @@ it('should generate TLA+ that passes TLC', async () => {
 
 1. Add to Zod schema in `lib/types/specification.ts`:
 ```typescript
-export const SpecificationSchema = z.object({
-  // ...
-  invariants: z.array(z.object({
-    type: z.enum([
-      'idempotent',
-      'no_double_spend',
-      'atomic_no_partial_commit',
-      'conservation',
-      'my_new_invariant' // Add here
-    ]),
-    // ...
-  })),
-});
+export const InvariantTypeSchema = z.enum([
+  'idempotent',
+  'no_double_spend',
+  'atomic_no_partial_commit',
+  'conservation',
+  'my_new_invariant' // Add here
+]);
 ```
 
-2. Add TLA+ translation in `lib/verification/tla-generator.ts`:
+2. Add Z3 constraint generation in `lib/verification/z3-generator.ts`:
 ```typescript
-function translateInvariant(inv: Invariant): TLAInvariant {
-  switch (inv.type) {
-    case 'my_new_invariant':
-      return {
-        name: 'MyNewInvariant',
-        predicate: '\\A x \\in Domain : Property(x)',
-        description: 'Description of the invariant',
-      };
-    // ... other cases
+function generateInvariantConstraints(spec: Specification): Z3Constraint[] {
+  const constraints: Z3Constraint[] = [];
+
+  for (const invariant of spec.invariants) {
+    switch (invariant.type) {
+      case 'my_new_invariant':
+        constraints.push(generateMyNewInvariantConstraint(spec, invariant));
+        break;
+      // ... other cases
+    }
   }
+
+  return constraints;
+}
+
+function generateMyNewInvariantConstraint(
+  spec: Specification,
+  inv: Invariant
+): Z3Constraint {
+  return {
+    name: 'MyNewInvariant',
+    formula: '(assert ...)', // Your Z3 formula
+    description: 'Description of invariant',
+    type: 'invariant',
+  };
 }
 ```
 
-3. Update prompt template in `templates/prompts/code-generation.txt`
+3. Add test:
+```typescript
+it('should verify my_new_invariant', async () => {
+  const spec = parseSpec(yamlWithMyInvariant);
+  const result = await runCEGISLoop(spec, 5);
+  expect(result.success).toBe(true);
+});
+```
 
-4. Add example spec in `templates/specs/`
+4. Update prompt template in `templates/prompts/code-generation.txt`
 
 ### Adding a New Fault Scenario
 
 1. Update `FaultModel` type in `lib/types/specification.ts`
-2. Add action generation in `tla-generator.ts`:
+2. Add constraint generation in `z3-generator.ts`:
 ```typescript
 if (spec.faultModel.network_partition) {
-  actions.push({
+  constraints.push({
     name: 'NetworkPartition',
-    guards: ['connected'],
-    updates: ['connected\' = FALSE'],
-    unchanged: ['state'],
+    formula: '(assert (or connected (not connected)))',
+    description: 'Network can partition',
+    type: 'transition',
   });
 }
 ```
 
-3. Include in `Next` relation:
-```tla
-Next ==
-    \/ MainAction
-    \/ DuplicateAction
-    \/ NetworkPartition  \* New action
-```
+3. Include in fault model constraints generation
 
-### Debugging TLA+ Generation
+### Debugging Z3 Generation
 
-1. Enable TLA+ output writing:
+1. Enable Z3 output writing:
 ```typescript
-await writeFile('debug-output.tla', tlaSpec);
+await writeFile('debug-output.smt2', smtLib);
 ```
 
-2. Run TLC manually:
+2. Test Z3 directly:
 ```bash
-docker run --rm -v $(pwd):/workspace guardrails-tlc debug-output.tla
+pnpm tsx scripts/test-z3.ts
 ```
 
-3. Check TLC output for syntax errors or logical issues
+3. Check Z3 output for syntax errors or logical issues
 
-4. Compare with working examples in `templates/tla/`
+4. Validate SMT-LIB syntax manually or with online Z3 playground
 
 ### Improving LLM Code Generation
 
@@ -743,13 +891,13 @@ docker run --rm -v $(pwd):/workspace guardrails-tlc debug-output.tla
 ### Security
 - **Never execute generated code** directly on the server
 - Validate all user inputs with Zod schemas
-- Sanitize TLA+ specs before Docker execution
-- Use read-only Docker volumes where possible
+- Sanitize specs before Z3 execution
+- Use WASM isolation for Z3 solver
 
 ### Performance
-- TLC can be **very slow** for large state spaces
+- Z3 can be **slow** for complex constraints
 - Use `bounds` wisely (small values: 2-5)
-- Timeout TLC after 60 seconds
+- Timeout Z3 after 60 seconds
 - Cache verified specs (future enhancement)
 
 ### LLM Limitations
@@ -758,20 +906,20 @@ docker run --rm -v $(pwd):/workspace guardrails-tlc debug-output.tla
 - Max 8 iterations to prevent infinite loops
 - Token limits: keep prompts < 8K tokens
 
-### TLA+ Constraints
-- TLC only explores **finite state spaces**
+### Z3 Constraints
+- Z3 works best with **finite domains**
 - Must bound all sets (accounts, retries, messages)
 - Some invariants are **undecidable** (use approximations)
-- TLC syntax is strict (test generated specs!)
+- SMT-LIB syntax is strict (test generated formulas!)
 
 ---
 
 ## Resources
 
-### TLA+ Learning
-- [Learn TLA+](https://learntla.com/) - Excellent tutorial
-- [TLA+ Examples](https://github.com/tlaplus/Examples) - Official examples
-- [Practical TLA+](https://link.springer.com/book/10.1007/978-1-4842-3829-5) - Book by Hillel Wayne
+### Z3 & SMT Solver Learning
+- [Z3 Guide](https://rise4fun.com/z3/tutorial) - Official tutorial
+- [SMT-LIB Standard](https://smtlib.cs.uiowa.edu/) - SMT-LIB format
+- [z3-solver npm](https://www.npmjs.com/package/z3-solver) - JavaScript bindings
 
 ### Distributed Systems Patterns
 - [Designing Data-Intensive Applications](https://dataintensive.net/) - Martin Kleppmann
@@ -800,11 +948,9 @@ pnpm test          # Run all tests
 pnpm test:ui       # Open Vitest UI
 ```
 
-### 3. Build Docker Images
+### 3. Test Z3 Directly
 ```bash
-cd docker
-docker build -t guardrails-tlc tlc/
-docker-compose up
+pnpm tsx scripts/test-z3.ts
 ```
 
 ### 4. Implement a Feature
@@ -819,10 +965,11 @@ docker-compose up
 
 ### 5. Debug Issues
 
-**TLA+ generation issues:**
-- Check `templates/tla/Transfer.tla` for working example
-- Validate TLA+ syntax with TLC manually
-- Add debug logging in `tla-generator.ts`
+**Z3 generation issues:**
+- Check generated SMT-LIB format
+- Validate syntax with `pnpm tsx scripts/test-z3.ts`
+- Add debug logging in `z3-generator.ts`
+- Compare with working examples
 
 **LLM generation issues:**
 - Check prompt templates in `templates/prompts/`
@@ -831,7 +978,7 @@ docker-compose up
 - Decrease temperature for more determinism
 
 **Verification failures:**
-- Examine counterexample trace
+- Examine counterexample model
 - Check if invariant is too strict
 - Verify bounds are appropriate
 - Ensure fault model matches spec
@@ -847,9 +994,9 @@ docker-compose up
 | Parse YAML spec | `lib/core/spec-parser.ts` |
 | Generate code | `lib/core/code-generator.ts` |
 | Orchestrate CEGIS | `lib/core/cegis-loop.ts` |
-| Generate TLA+ | `lib/verification/tla-generator.ts` |
-| Run TLC | `lib/verification/tlc-runner.ts` |
-| Parse errors | `lib/verification/counterexample-parser.ts` |
+| Generate Z3 SMT-LIB | `lib/verification/z3-generator.ts` |
+| Run Z3 solver | `lib/verification/z3-runner.ts` |
+| Parse Z3 models | `lib/verification/counterexample-parser.ts` |
 | Call OpenRouter | `lib/services/openrouter.service.ts` |
 
 ### Key Types
@@ -857,10 +1004,10 @@ docker-compose up
 | Type | File | Purpose |
 |------|------|---------|
 | `Specification` | `types/specification.ts` | YAML spec structure |
-| `TLAModule` | `types/tla-ast.ts` | TLA+ AST |
+| `Z3Module` | `types/z3-ast.ts` | Z3 AST |
 | `VerificationResult` | `types/verification.ts` | CEGIS output |
-| `TLCResult` | `types/verification.ts` | TLC output |
-| `CounterExample` | `types/verification.ts` | Bug trace |
+| `Z3Result` | `types/verification.ts` | Z3 solver output |
+| `CounterExample` | `types/verification.ts` | Bug model |
 
 ### Environment Variables
 
@@ -868,7 +1015,6 @@ docker-compose up
 OPENROUTER_API_KEY=sk-or-your-key-here                 # Required
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_...           # Optional
 CLERK_SECRET_KEY=sk_...                            # Optional
-TLC_DOCKER_IMAGE=guardrails-tlc                    # Default
 NODE_ENV=development|production                     # Auto-set
 ```
 
@@ -881,10 +1027,10 @@ NODE_ENV=development|production                     # Auto-set
 - Check `tsconfig.json` paths are correct
 - Verify imports use `@/` alias
 
-### TLC Docker fails
-- Build TLC image: `cd docker/tlc && docker build -t guardrails-tlc .`
-- Check Docker is running
-- Verify volume mounts are correct
+### Z3 WASM files not found
+- Run `pnpm tsx scripts/copy-z3-wasm.ts`
+- Check `public/z3/*.wasm` files exist
+- Verify z3-solver package is installed
 
 ### Zod validation fails
 - Check YAML structure matches `SpecificationSchema`
@@ -897,94 +1043,30 @@ NODE_ENV=development|production                     # Auto-set
 - Try reducing prompt size
 - Add retry logic with exponential backoff
 
----
-
-## Next Steps for Implementation
-
-### Phase 1: Core Parsing (Priority 1)
-- [ ] Implement `spec-parser.ts` with full Zod validation
-- [ ] Add comprehensive error messages
-- [ ] Test with all example specs
-
-### Phase 2: TLA+ Generation (Priority 1)
-- [ ] Implement `tla-generator.ts` for basic specs
-- [ ] Support all invariant types
-- [ ] Test generated TLA+ manually with TLC
-
-### Phase 3: TLC Integration (Priority 1)
-- [ ] Implement `tlc-runner.ts` with Docker
-- [ ] Parse TLC output correctly
-- [ ] Extract counterexamples
-
-### Phase 4: LLM Integration (Priority 2)
-- [ ] Implement OpenRouter service wrapper
-- [ ] Create prompt templates
-- [ ] Add retry logic
-
-### Phase 5: CEGIS Loop (Priority 2)
-- [ ] Implement full `cegis-loop.ts`
-- [ ] Add iteration history tracking
-- [ ] Generate proof reports
-
-### Phase 6: UI Polish (Priority 3)
-- [ ] Add syntax highlighting to editors
-- [ ] Improve trace visualization
-- [ ] Add real-time progress updates
-
-### Phase 7: Optimizations (Priority 3)
-- [ ] Cache verified specs
-- [ ] Parallel TLC execution
-- [ ] Incremental verification
-
-### Phase 8: Auth & History (Priority 1)
-- [ ] Integrate Clerk middleware for protected routes
-- [ ] Create sign-in/up routes under `app/(auth)/`
-- [ ] Persist verification runs to MongoDB Atlas
-- [ ] Build history dashboard + `/api/history`
-
----
-
-## Contributing Guidelines
-
-### Code Style
-- Use TypeScript strict mode
-- Add JSDoc comments to all exported functions
-- Use meaningful variable names
-- Prefer functional programming patterns
-
-### Error Handling
-- Use custom error classes from `utils/errors.ts`
-- Always provide context in error messages
-- Log errors with `logger.error()`
-
-### Testing
-- Write tests before implementing (TDD)
-- Aim for >80% code coverage
-- Use fixtures for complex test data
-- Mock external services (OpenRouter, Docker)
-
-### Documentation
-- Update this file when adding new concepts
-- Add inline comments for complex logic
-- Keep README.md user-focused
-- Document all breaking changes
+### Z3 returns "unknown"
+- Reduce bounds (fewer accounts/retries)
+- Simplify constraints
+- Increase timeout
+- Check for unsupported SMT-LIB features
 
 ---
 
 ## Glossary
 
 - **CEGIS**: Counter-Example Guided Inductive Synthesis
-- **TLA+**: Temporal Logic of Actions (specification language)
-- **TLC**: TLA+ model checker
+- **Z3**: SMT solver from Microsoft Research
+- **SMT**: Satisfiability Modulo Theories
+- **SMT-LIB**: Standard input format for SMT solvers
+- **sat**: Satisfiable (counterexample exists = bug found)
+- **unsat**: Unsatisfiable (no counterexample = verified)
 - **Invariant**: Property that must hold in all states
 - **Fault model**: Specification of failure scenarios
 - **Idempotency**: Property that repeated execution has same effect as single execution
 - **Conservation**: Property that total resources remain constant
-- **State space**: All possible system states
-- **Counterexample**: Execution trace showing invariant violation
+- **Counterexample**: Model showing invariant violation
 - **Synthesis**: Automatic program generation
 
 ---
 
-*Last Updated: 2025-10-04*
-*Version: 1.0.0*
+*Last Updated: 2025-10-08 (Phase 1 Modernization)*
+*Version: 2.0.0 - Z3 Architecture*
