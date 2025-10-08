@@ -1,12 +1,16 @@
-#!/usr/bin/env node
+#!/usr/bin/env tsx
 /**
  * Copy Z3 WASM files to public directory
- * 
+ *
  * This ensures z3-solver can find its WASM files in Next.js builds.
  */
 
-const fs = require('fs');
-const path = require('path');
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const sourceDir = path.join(__dirname, '..', 'node_modules', 'z3-solver', 'build');
 const publicDir = path.join(__dirname, '..', 'public', 'z3');
@@ -39,26 +43,26 @@ if (!fs.existsSync(sourceDir)) {
 try {
   const files = fs.readdirSync(sourceDir);
   let copiedCount = 0;
-  
+
   for (const file of files) {
     if (file.endsWith('.wasm') || file.endsWith('.js') || file.endsWith('.worker.js')) {
       const sourcePath = path.join(sourceDir, file);
-      
+
       // Copy to public directory
       const publicDestPath = path.join(publicDir, file);
       fs.copyFileSync(sourcePath, publicDestPath);
-      
+
       // Also copy to .next/server/vendor-chunks if it exists
       if (fs.existsSync(nextServerDir)) {
         const nextDestPath = path.join(nextServerDir, file);
         fs.copyFileSync(sourcePath, nextDestPath);
       }
-      
+
       copiedCount++;
       console.log(`✓ Copied ${file}`);
     }
   }
-  
+
   if (copiedCount === 0) {
     console.warn('⚠️  No WASM files found in', sourceDir);
   } else {
@@ -68,7 +72,7 @@ try {
     }
   }
 } catch (error) {
-  console.error('❌ Error copying Z3 files:', error.message);
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  console.error('❌ Error copying Z3 files:', errorMessage);
   process.exit(0); // Don't fail the install
 }
-

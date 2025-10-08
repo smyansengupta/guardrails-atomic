@@ -12,12 +12,19 @@ export async function generateWithOpenRouter(
   model: string = 'openai/gpt-4'
 ): Promise<string> {
   try {
+    // Support both OPENROUTER_API_KEY (preferred) and OPENAI_API_KEY (fallback)
+    const apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
+
+    if (!apiKey) {
+      throw new CodeGenerationError('Missing API key: Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env.local');
+    }
+
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "HTTP-Referer": `${process.env.PROJECT_URL}`,
-        "X-Title": `${process.env.PROJECT_NAME}`,
+        "Authorization": `Bearer ${apiKey}`,
+        "HTTP-Referer": `${process.env.PROJECT_URL || 'http://localhost:3000'}`,
+        "X-Title": `${process.env.PROJECT_NAME || 'Guardrails: Atomic'}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({

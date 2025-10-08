@@ -17,10 +17,19 @@ export function ProofReport({ report }: ProofReportProps) {
         <CardTitle>Verification Complete</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4 text-green-900">
-        <div>
-          <p className="font-semibold">States explored:</p>
-          <Badge variant="secondary">{report.statesExplored.toLocaleString()}</Badge>
-        </div>
+        {report.statesExplored !== undefined && (
+          <div>
+            <p className="font-semibold">States explored:</p>
+            <Badge variant="secondary">{report.statesExplored.toLocaleString()}</Badge>
+          </div>
+        )}
+
+        {report.constraintsChecked !== undefined && (
+          <div>
+            <p className="font-semibold">Constraints checked:</p>
+            <Badge variant="secondary">{report.constraintsChecked}</Badge>
+          </div>
+        )}
 
         <div>
           <p className="font-semibold">Invariants verified:</p>

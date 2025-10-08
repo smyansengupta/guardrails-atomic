@@ -103,21 +103,15 @@ function generateConstants(spec: Specification): Z3Constant[] {
  */
 function generatePreconditionConstraints(spec: Specification): Z3Constraint[] {
   return spec.preconditions
-    .filter(precond => {
-      // Skip preconditions with dynamic array access (state[variable])
-      const hasDynamicAccess = /(?:state|result)\[(?!a\d+)[a-z_]+\]/i.test(precond);
-      if (hasDynamicAccess) {
-        logger.warn('Skipping precondition with dynamic array access', { precond });
-        return false;
-      }
-      return true;
-    })
-    .map((precond, idx) => ({
-      name: `Precondition_${idx + 1}`,
-      formula: translateConditionToZ3(precond, spec),
-      description: precond,
-      type: 'precondition' as const,
-    }));
+    .map((precond, idx) => {
+      const formula = translateConditionToZ3(precond, spec, false);
+      return {
+        name: `Precondition_${idx + 1}`,
+        formula,
+        description: precond,
+        type: 'precondition' as const,
+      };
+    });
 }
 
 /**
@@ -125,22 +119,15 @@ function generatePreconditionConstraints(spec: Specification): Z3Constraint[] {
  */
 function generatePostconditionConstraints(spec: Specification): Z3Constraint[] {
   return spec.postconditions
-    .filter(postcond => {
-      // Skip postconditions with dynamic array access (state[variable])
-      // These require Z3 arrays or enumeration to handle properly
-      const hasDynamicAccess = /(?:state|result)\[(?!a\d+)[a-z_]+\]/i.test(postcond);
-      if (hasDynamicAccess) {
-        logger.warn('Skipping postcondition with dynamic array access', { postcond });
-        return false;
-      }
-      return true;
-    })
-    .map((postcond, idx) => ({
-      name: `Postcondition_${idx + 1}`,
-      formula: translateConditionToZ3(postcond, spec, true),
-      description: postcond,
-      type: 'postcondition' as const,
-    }));
+    .map((postcond, idx) => {
+      const formula = translateConditionToZ3(postcond, spec, true);
+      return {
+        name: `Postcondition_${idx + 1}`,
+        formula,
+        description: postcond,
+        type: 'postcondition' as const,
+      };
+    });
 }
 
 /**
@@ -270,37 +257,60 @@ function generateAtomicityConstraint(spec: Specification, inv: Invariant): Z3Con
 
 /**
  * Translate YAML condition to Z3 SMT-LIB format
+ *
+ * Handles:
+ * - Dynamic array access: state[variable] where variable is a parameter
+ * - old() function for before/after state comparison
+ * - Arithmetic and comparison operators
  */
 function translateConditionToZ3(condition: string, spec: Specification, isPostcondition: boolean = false): string {
   let z3 = condition.trim();
 
   // Handle sum() function FIRST (before state references)
+  // In postconditions:
+  //   sum(result.values()) = after-state sum
+  //   sum(state.values()) = before-state sum (OLD state)
   z3 = z3.replace(/sum\(([^)]+)\.values\(\)\)/g, (_, expr) => {
-    // Extract variable name from expression like "result" or "state"
-    // In postconditions: result = after state, state = before state
-    // In preconditions: state = before state
-    const useAfter = expr.includes('result');
     const numAccounts = spec.bounds?.accts || 3;
+    let useAfter: boolean;
+
+    if (isPostcondition) {
+      // In postconditions: result = after, state = before
+      useAfter = expr.includes('result');
+    } else {
+      // In preconditions: always before state
+      useAfter = false;
+    }
+
     const balances = Array.from(
-      { length: numAccounts }, 
+      { length: numAccounts },
       (_, i) => `balance_a${i + 1}${useAfter ? '_after' : ''}`
     );
     return `(+ ${balances.join(' ')})`;
   });
 
-  // Replace state references
-  if (isPostcondition) {
-    z3 = z3.replace(/state\[(\w+)\]/g, 'balance_$1_after');
-    z3 = z3.replace(/result\[(\w+)\]/g, 'balance_$1_after');
+  // Handle dynamic array access: state[variable] where variable is a parameter
+  // Need to enumerate all possible values based on bounds
+  const hasDynamicAccess = /(?:state|result)\[([a-z_]+)\]/i.test(z3);
+
+  if (hasDynamicAccess) {
+    // Enumerate all possible account values
+    z3 = enumerateDynamicArrayAccess(z3, spec, isPostcondition);
   } else {
-    z3 = z3.replace(/state\[(\w+)\]/g, 'balance_$1');
+    // Static array access: state[a1], state[a2], etc.
+    if (isPostcondition) {
+      // In postconditions: result[x] = after, state[x] = before
+      z3 = z3.replace(/result\[(\w+)\]/g, 'balance_$1_after');
+      z3 = z3.replace(/state\[(\w+)\]/g, 'balance_$1'); // BEFORE state
+    } else {
+      z3 = z3.replace(/state\[(\w+)\]/g, 'balance_$1');
+    }
   }
 
   // Handle != operator (convert to distinct) - BEFORE other operators
   z3 = z3.replace(/(\w+)\s*!=\s*(\w+)/g, '(distinct $1 $2)');
-  
-  // Handle == operator - match more carefully to handle expressions
-  // Match: "expr1 == expr2" where expr can contain parentheses
+
+  // Handle == operator
   if (z3.includes('==')) {
     const parts = z3.split('==').map(p => p.trim());
     if (parts.length === 2) {
@@ -309,7 +319,6 @@ function translateConditionToZ3(condition: string, spec: Specification, isPostco
   }
 
   // Handle comparison operators: >=, <=, >, <
-  // Only if not already wrapped
   if (!z3.startsWith('(')) {
     z3 = z3.replace(/(\w+)\s*(>=|<=|>|<)\s*(-?\w+)/g, '($2 $1 $3)');
   }
@@ -317,11 +326,107 @@ function translateConditionToZ3(condition: string, spec: Specification, isPostco
   // Handle boolean operators
   z3 = z3.replace(/&&/g, 'and');
   z3 = z3.replace(/\|\|/g, 'or');
-  
-  // Handle negation carefully (don't replace ! in !=)
   z3 = z3.replace(/!(?!=)/g, 'not ');
 
   return z3;
+}
+
+/**
+ * Enumerate dynamic array access for all possible parameter values
+ *
+ * Example: "state[from] >= amt" with from parameter and bounds.accts = 3
+ * Becomes: "(or (and (= from 1) (>= balance_a1 amt))
+ *              (and (= from 2) (>= balance_a2 amt))
+ *              (and (= from 3) (>= balance_a3 amt)))"
+ */
+function enumerateDynamicArrayAccess(
+  condition: string,
+  spec: Specification,
+  isPostcondition: boolean
+): string {
+  const numAccounts = spec.bounds?.accts || 3;
+
+  // Find all dynamic array accesses
+  const dynamicAccessRegex = /(?:state|result)\[([a-z_]+)\]/gi;
+  const matches = Array.from(condition.matchAll(dynamicAccessRegex));
+
+  if (matches.length === 0) {
+    return condition;
+  }
+
+  // For simplicity, handle common case: single parameter (from or to)
+  const paramName = matches[0][1]; // e.g., "from" or "to"
+
+  // Generate disjunctive constraint for each possible account
+  const cases: string[] = [];
+
+  for (let i = 1; i <= numAccounts; i++) {
+    // Replace state[param] with balance_a{i} for this case
+    let caseCondition = condition;
+
+    // Replace occurrences based on context
+    if (isPostcondition) {
+      // In postconditions:
+      //   result[param] → balance_a{i}_after (after state)
+      //   state[param] → balance_a{i} (before state)
+      caseCondition = caseCondition.replace(
+        new RegExp(`result\\[${paramName}\\]`, 'g'),
+        `balance_a${i}_after`
+      );
+      caseCondition = caseCondition.replace(
+        new RegExp(`state\\[${paramName}\\]`, 'g'),
+        `balance_a${i}` // BEFORE state
+      );
+    } else {
+      // In preconditions: always before state
+      caseCondition = caseCondition.replace(
+        new RegExp(`state\\[${paramName}\\]`, 'g'),
+        `balance_a${i}`
+      );
+    }
+
+    // CRITICAL: Translate operators to SMT-LIB format BEFORE wrapping
+    caseCondition = translateOperatorsToSMTLib(caseCondition);
+
+    // Add guard: param = i
+    cases.push(`(and (= ${paramName} ${i}) ${caseCondition})`);
+  }
+
+  // Return disjunction of all cases
+  return cases.length > 1 ? `(or ${cases.join(' ')})` : cases[0];
+}
+
+/**
+ * Helper function to translate operators to SMT-LIB format
+ * This handles >=, <=, >, <, ==, !=, &&, ||, !
+ */
+function translateOperatorsToSMTLib(expr: string): string {
+  let result = expr.trim();
+
+  // Handle != operator (convert to distinct) - BEFORE other operators
+  result = result.replace(/(\w+)\s*!=\s*(\w+)/g, '(distinct $1 $2)');
+
+  // Handle == operator
+  if (result.includes('==')) {
+    const parts = result.split('==').map(p => p.trim());
+    if (parts.length === 2) {
+      result = `(= ${parts[0]} ${parts[1]})`;
+    }
+  }
+
+  // Handle comparison operators: >=, <=, >, <
+  // Only if not already wrapped
+  if (!result.startsWith('(')) {
+    // Match patterns like "balance_a1 >= amt"
+    result = result.replace(/(\w+)\s*(>=|<=|>|<)\s*(-?\w+)/g, '($2 $1 $3)');
+  }
+
+  // Handle boolean operators
+  result = result.replace(/&&/g, 'and');
+  result = result.replace(/\|\|/g, 'or');
+  result = result.replace(/!(?!=)/g, 'not ');
+
+  return result;
 }
 
 /**

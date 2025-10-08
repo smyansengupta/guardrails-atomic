@@ -1,9 +1,9 @@
-/** @type {import('next').NextConfig} */
-const path = require('path');
+import type { NextConfig } from 'next';
+import path from 'path';
 
-const nextConfig = {
+const nextConfig: NextConfig = {
   output: 'standalone',
-  
+
   // Configure webpack to handle WASM files (needed for z3-solver)
   webpack: (config, { isServer }) => {
     if (isServer) {
@@ -26,12 +26,12 @@ const nextConfig = {
       // Ensure z3-solver can resolve its WASM file
       config.resolve.alias = {
         ...config.resolve.alias,
-        'z3-solver': path.resolve(__dirname, 'node_modules/z3-solver'),
+        'z3-solver': path.resolve(process.cwd(), 'node_modules/z3-solver'),
       };
     }
 
     return config;
   },
-}
+};
 
-module.exports = nextConfig
+export default nextConfig;
